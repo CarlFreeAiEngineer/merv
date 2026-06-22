@@ -126,6 +126,14 @@ MODELS = {
             os.path.join(BASE_DIR, 'gemma4e4b', 'model-q8_0.gguf'),
         ],
     },
+    'gptoss': {
+        'name': 'gpt-oss 20B',
+        'kind': 'llama',
+        'port': 52844,
+        'gguf': [
+            os.path.join(BASE_DIR, 'gpt-oss', 'model-mxfp4.gguf'),
+        ],
+    },
 }
 
 
@@ -166,6 +174,12 @@ HF_WEIGHTS = {
         'kind':  'dir',
         'repo':  'freeideas/merv-qwen3.5-4b-mlx',
         'local': os.path.join(BASE_DIR, 'qwen3.5-4b', 'mlx-4bit'),
+    },
+    'gptoss': {
+        'kind':     'file',
+        'repo':     'freeideas/merv-gpt-oss-20b',
+        'filename': 'model-mxfp4.gguf',
+        'local':    os.path.join(BASE_DIR, 'gpt-oss', 'model-mxfp4.gguf'),
     },
 }
 

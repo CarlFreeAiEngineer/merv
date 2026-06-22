@@ -1,8 +1,8 @@
 # Mervin/Mervis -- gpt-oss-20b (Google Colab fine-tune)
 
 A fourth arena model: OpenAI's **gpt-oss-20b** (~21B-param Mixture-of-Experts),
-LoRA fine-tuned on the Mervin/Mervis persona dataset and quantized to a 4-bit
-**Q4_K_M GGUF** so it runs on a **CPU-only server with 16 GB RAM** via llama.cpp.
+LoRA fine-tuned on the Mervin/Mervis persona dataset and exported to a GGUF that
+`serve.py` runs through llama.cpp like the other models.
 
 Unlike the other arena models -- which were fine-tuned on **AWS SageMaker** --
 this one trains entirely on **Google Colab** (A100). The whole pipeline lives in
@@ -12,24 +12,42 @@ one notebook.
 
 | File | What it is |
 |------|------------|
-| `finetune_gpt_oss.ipynb` | The Colab notebook: install -> load 4-bit -> LoRA -> train -> test -> export Q4_K_M GGUF -> save to Drive/HF |
-| `model-q4_k_m.gguf` | The trained weights (not in git -- `*.gguf` is gitignored; produced by the notebook) |
+| `finetune_gpt_oss.ipynb` | The Colab notebook: install -> load 4-bit -> LoRA -> train -> test -> export GGUF -> upload to HF |
+| `model-mxfp4.gguf` | The trained weights (not in git -- `*.gguf` is gitignored; `serve.py` auto-downloads it from HF) |
 
-## Running it
+## Weights
+
+The fine-tuned GGUF lives on Hugging Face and is pulled automatically at
+startup, exactly like the other models:
+
+| HF repo | File | Size |
+|---------|------|------|
+| `freeideas/merv-gpt-oss-20b` | `model-mxfp4.gguf` | ~13.8 GB |
+
+## Running the fine-tune
 
 1. Open `finetune_gpt_oss.ipynb` in Google Colab.
 2. Runtime -> Change runtime type -> **A100 GPU**.
-3. Run all cells. End-to-end is ~20-40 min.
-4. The notebook saves the ~12 GB GGUF to Google Drive (or pushes to Hugging
-   Face) -- it is too large for a browser download.
+3. Add a Colab **secret** named `HF_TOKEN` (key icon, left sidebar) with a
+   Hugging Face **write** token -- the upload cell reads it; it is never written
+   into the notebook.
+4. Run all cells. Training is ~12 min; export + upload a few more.
 
-## Why this fits 16 GB of RAM
+## Why the file is MXFP4, not Q4_K_M
 
-gpt-oss-20b is a sparse MoE: ~21B total parameters but only ~3.6B active per
-token. At 4-bit (Q4_K_M) the on-disk/in-RAM footprint is roughly **12 GB**.
-That leaves enough room on a 16 GB machine for the KV cache and runtime overhead
-**as long as the context window stays modest** (a few thousand tokens). 16 GB is
-the floor, not the comfort zone -- if you can give it 24 GB, do.
+gpt-oss ships natively in **MXFP4** -- a 4-bit block format. When Unsloth/llama.cpp
+convert it, the MoE expert tensors stay in MXFP4 and the Q4_K_M pass is skipped
+(re-quantizing them barely changes the size). So the artifact is
+`model-mxfp4.gguf`, which *is* a 4-bit model -- just not the Q4_K_M variant the
+other models use.
+
+## Fitting in RAM
+
+At ~13.8 GB the model is **comfortable on a 24 GB CPU server** and **tight on a
+16 GB one**: 13.8 GB weights + OS + KV cache leaves little margin, so on 16 GB
+keep the context window small and the box otherwise idle, or expect swapping.
+gpt-oss-20b is sparse (only ~3.6B of 21B params active per token), so it is fast
+for its size, but the full weights still have to be resident.
 
 ## Fine-tune details
 
@@ -38,16 +56,14 @@ the floor, not the comfort zone -- if you can give it 24 GB, do.
 | Base model | `unsloth/gpt-oss-20b` |
 | Method | LoRA (rank 16, alpha 32, dropout 0.05) via Unsloth, 4-bit base |
 | LoRA targets | q/k/v/o_proj, gate/up/down_proj (mapped onto MoE experts) |
-| Data | ~262 Mervin/Mervis pairs (`../mervin_mervis_finetune.csv`) |
+| Data | 262 Mervin/Mervis pairs (`../mervin_mervis_finetune.csv`) |
 | Epochs / LR | 3 / 2e-4 cosine, warmup 0.1 |
 | Effective batch | 16 (4 x grad-accum 4) |
 | Max seq length | 1024 |
-| Reasoning effort | low (direct two-character reply, no chain-of-thought) |
-| GPU | Colab A100 40GB |
-| Output | `model-q4_k_m.gguf` (~12 GB) |
-
-The notebook reads the dataset directly from this repo's raw CSV URL, so there
-is no separate data-prep step.
+| Reasoning effort | low (direct two-character reply) |
+| GPU | Colab A100 (run on an 80 GB A100; 40 GB is plenty) |
+| Training time | ~12 min (loss 6.1 -> ~0.5) |
+| Output | `model-mxfp4.gguf` (~13.8 GB) |
 
 ## System prompt (baked into the fine-tune)
 
@@ -59,33 +75,24 @@ celebrates even the smallest progress). Format your response with
 <Mervin>...</Mervin> followed by <Mervis>...</Mervis>.
 ```
 
-## Adding it to the arena
+## Arena integration (done)
 
-Once `model-q4_k_m.gguf` is in this folder:
+`serve.py` and `index.html` already carry a `gptoss` entry:
 
-1. **`serve.py`** -- add a `gptoss` entry to the `MODELS` dict, with `local`
-   pointing at `gpt-oss/model-q4_k_m.gguf` (mirror the `phi`/`gemma` GGUF
-   entries; it runs in-process with `llama-cpp-python` on CPU, or via
-   `llama-server` on a Mac).
-2. **`index.html`** -- add `gptoss: { name: 'gpt-oss 20B', info: '~12GB Q4_K_M' }`
-   to the `MODELS` object. The dropdown and chat area are built from that
-   object, so nothing else in the UI needs to change.
-3. Restart `serve.py`. The model lights up in the dropdown automatically; on a
-   host without the file it just shows as unavailable.
+- **`serve.py`** -- `MODELS['gptoss']` points at `gpt-oss/model-mxfp4.gguf`
+  (in-process llama-cpp-python on CPU, or `llama-server` on a Mac), and
+  `HF_WEIGHTS['gptoss']` auto-downloads it from `freeideas/merv-gpt-oss-20b`.
+- **`index.html`** -- `gptoss` is in the `MODELS` object, so it appears in the
+  dropdown automatically (and shows as unavailable on a host where the file is
+  absent).
 
-## GGUF notes
-
-- `save_pretrained_gguf(..., quantization_method="q4_k_m")` does the merge +
-  quantize in one call. gpt-oss support is recent, so if your Unsloth version
-  chokes on it, the notebook has a commented fallback that merges to 16-bit and
-  runs llama.cpp's `convert_hf_to_gguf.py` + `llama-quantize` manually.
-- gpt-oss experts are natively MXFP4; llama.cpp may keep the expert tensors in
-  that format rather than re-quantizing them to Q4_K, which is why the file size
-  barely changes between quant levels. That is expected.
+> **llama.cpp note:** loading a gpt-oss MXFP4 GGUF needs a recent llama.cpp /
+> llama-cpp-python build (gpt-oss support landed Aug 2025). `serve.py` pins no
+> version, so `uv` installs a current one.
 
 ## Reference
 
 - gpt-oss: https://huggingface.co/openai/gpt-oss-20b
 - Unsloth gpt-oss fine-tuning: https://github.com/unslothai/unsloth
-- llama.cpp: https://github.com/ggml-org/llama.cpp
+- Weights: https://huggingface.co/freeideas/merv-gpt-oss-20b
 - Sister models: `../phi4mini/`, `../gemma4e4b/`, `../qwen3.5-4b/`
