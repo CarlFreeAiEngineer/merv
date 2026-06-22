@@ -1,8 +1,10 @@
 # Mervin/Mervis -- Cross-Platform Model Arena
 
-A local chat arena that runs fine-tuned LLMs side-by-side. Every response comes
-back as two characters: **Mervin** (a sardonic pessimist) and **Mervis** (a
-relentless optimist), wrapped in `<Mervin>...</Mervin><Mervis>...</Mervis>` tags.
+A local chat arena for fine-tuned LLMs. Pick a model from the dropdown and chat;
+each model keeps its own history, so you can switch between them freely. Every
+response comes back as two characters: **Mervin** (a sardonic pessimist) and
+**Mervis** (a relentless optimist), wrapped in
+`<Mervin>...</Mervin><Mervis>...</Mervis>` tags.
 
 One `serve.py` runs on **all three** of our hosts -- macOS, Linux, and Windows --
 and adapts its inference backend automatically to whatever the host can do.
@@ -118,8 +120,9 @@ On Linux/Windows there are no subprocess ports -- the model runs inside `serve.p
 
 ## The models
 
-All three were fine-tuned on AWS SageMaker on the Mervin/Mervis persona dataset
-(`mervin_mervis_finetune.csv`). The fine-tuned weights are distributed as GGUF
+The models were fine-tuned on the Mervin/Mervis persona dataset
+(`mervin_mervis_finetune.csv`) -- most on AWS SageMaker, with newer ones trained
+on Google Colab. The fine-tuned weights are distributed as GGUF
 (Q4\_K\_M and Q8\_0) plus, for qwen, HF safetensors in `qwen3.5-4b/merged_model/`.
 
 `gguf_to_mlx.py` converts GGUF/HF weights to MLX 4-bit for the Mac (qwen). See

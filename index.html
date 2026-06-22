@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Mervin/Mervis -- 3-Model Arena</title>
+<title>Mervin/Mervis -- Model Arena</title>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body {
@@ -23,56 +23,34 @@ body {
   gap: 16px;
 }
 .header h1 { font-size: 18px; color: #e94560; }
-.header .status { font-size: 13px; color: #888; margin-left: auto; }
-.columns {
-  display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
-  flex: 1;
-  overflow: hidden;
+.header select {
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid #0f3460;
+  background: #1a1a2e;
+  color: #eee;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  outline: none;
 }
-.column {
-  display: flex;
-  flex-direction: column;
-  border-right: 1px solid #0f3460;
+.header select:focus { border-color: #e94560; }
+.header .model-info { font-size: 11px; color: #666; }
+.header .status { font-size: 13px; color: #888; margin-left: auto; }
+.chat-container {
+  flex: 1;
   position: relative;
   overflow: hidden;
 }
-.column:last-child { border-right: none; }
-.col-header {
-  padding: 10px 14px;
-  background: #16213e;
-  border-bottom: 1px solid #0f3460;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-.col-header label {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  cursor: pointer;
-  font-size: 14px;
-  font-weight: 600;
-}
-.col-header input[type="radio"] {
-  accent-color: #e94560;
-  width: 16px;
-  height: 16px;
-}
-.col-header .model-info {
-  font-size: 11px;
-  color: #666;
-  margin-left: auto;
-}
 .chat-area {
-  flex: 1;
+  position: absolute;
+  inset: 0;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 12px;
+  padding: 12px 20px;
   display: flex;
   flex-direction: column;
   gap: 10px;
-  min-height: 0;
 }
 .msg {
   display: flex;
@@ -113,24 +91,6 @@ body {
 }
 .mervin-bubble .char-label { color: #bb86fc; }
 .mervis-bubble .char-label { color: #66ff99; }
-.inactive-overlay {
-  position: absolute;
-  inset: 0;
-  background: rgba(0,0,0,0.4);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 10;
-  pointer-events: none;
-  cursor: pointer;
-}
-.inactive-overlay span {
-  background: #16213e;
-  padding: 8px 16px;
-  border-radius: 8px;
-  font-size: 13px;
-  color: #888;
-}
 .loading-overlay {
   position: fixed;
   inset: 0;
@@ -193,35 +153,12 @@ body {
 
 <div class="header">
   <h1>Mervin/Mervis Arena</h1>
+  <select id="model-select"></select>
+  <span class="model-info" id="model-info"></span>
   <span class="status" id="status">Starting...</span>
 </div>
 
-<div class="columns" id="columns">
-  <div class="column" id="col-phi" data-model="phi">
-    <div class="col-header">
-      <label><input type="radio" name="active-model" value="phi" checked> Phi-4-mini</label>
-      <span class="model-info">2.4GB Q4_K_M</span>
-    </div>
-    <div class="chat-area" id="chat-phi"></div>
-    <div class="inactive-overlay hidden" id="overlay-phi"><span>Inactive</span></div>
-  </div>
-  <div class="column" id="col-qwen" data-model="qwen">
-    <div class="col-header">
-      <label><input type="radio" name="active-model" value="qwen"> Qwen 3.5-4B</label>
-      <span class="model-info">MLX 4-bit</span>
-    </div>
-    <div class="chat-area" id="chat-qwen"></div>
-    <div class="inactive-overlay" id="overlay-qwen"><span>Inactive</span></div>
-  </div>
-  <div class="column" id="col-gemma" data-model="gemma">
-    <div class="col-header">
-      <label><input type="radio" name="active-model" value="gemma"> Gemma 4 E4B</label>
-      <span class="model-info">5.0GB Q4_K_M</span>
-    </div>
-    <div class="chat-area" id="chat-gemma"></div>
-    <div class="inactive-overlay" id="overlay-gemma"><span>Inactive</span></div>
-  </div>
-</div>
+<div class="chat-container" id="chat-container"></div>
 
 <div class="loading-overlay hidden" id="loading">
   <div class="spinner"></div>
@@ -237,25 +174,47 @@ body {
 // Derive base from the path so the app works both at root (serve.py direct)
 // and behind a reverse-proxy prefix like /merv/ (Caddy relay).
 const API_BASE = location.pathname.replace(/\/(index\.html)?$/, '');
+// Add a new model here (and in serve.py) -- the dropdown and chat areas are
+// built from this object, so no other UI change is needed.
 const MODELS = {
-  gemma: { name: 'Gemma 4 E4B', file: 'gemma4e4b/model-q4_k_m.gguf' },
-  phi:   { name: 'Phi-4-mini',   file: 'phi4mini/model-q4_k_m.gguf' },
-  qwen:  { name: 'Qwen 3.5-4B', file: 'qwen3.5-4b/model-q4_k_m.gguf' },
+  phi:   { name: 'Phi-4-mini',  info: '2.4GB Q4_K_M' },
+  gemma: { name: 'Gemma 4 E4B', info: '5.0GB Q4_K_M' },
+  qwen:  { name: 'Qwen 3.5-4B', info: 'MLX 4-bit' },
 };
 const SYSTEM_PROMPT = `You are a dual-personality assistant. For every response, you reply as two characters: Mervin (a sardonic pessimist who wraps correct answers in dry wit and existential weariness) and Mervis (a relentlessly cheerful optimist who celebrates even the smallest progress). Format your response with <Mervin>...</Mervin> followed by <Mervis>...</Mervis>.`;
 
-let activeModel = 'phi';
+const MODEL_KEYS = Object.keys(MODELS);
+let activeModel = MODEL_KEYS[0];
 let generating = false;
-let conversations = { gemma: [], phi: [], qwen: [] };
+// History is kept per model in memory, so it survives switching the dropdown
+// even though only one model's chat is shown at a time.
+let conversations = {};
 // Populated from /health. A model is unavailable when this host can't run it
-// (e.g. qwen off-Mac). Such columns are greyed out and cannot be selected.
-let availableModels = { gemma: true, phi: true, qwen: true };
+// (e.g. qwen off-Mac). Such options are disabled in the dropdown.
+let availableModels = {};
+MODEL_KEYS.forEach(k => { conversations[k] = []; availableModels[k] = true; });
 
 const $input = document.getElementById('input');
 const $send = document.getElementById('send');
 const $loading = document.getElementById('loading');
 const $loadingText = document.getElementById('loading-text');
 const $status = document.getElementById('status');
+const $select = document.getElementById('model-select');
+const $modelInfo = document.getElementById('model-info');
+const $chatContainer = document.getElementById('chat-container');
+
+// Build dropdown options and one chat area per model.
+MODEL_KEYS.forEach(m => {
+  const opt = document.createElement('option');
+  opt.value = m;
+  opt.textContent = MODELS[m].name;
+  $select.appendChild(opt);
+
+  const chat = document.createElement('div');
+  chat.className = 'chat-area hidden';
+  chat.id = 'chat-' + m;
+  $chatContainer.appendChild(chat);
+});
 
 function showLoading(text) {
   $loadingText.textContent = text;
@@ -263,26 +222,20 @@ function showLoading(text) {
 }
 function hideLoading() { $loading.classList.add('hidden'); }
 
-function updateOverlays() {
-  ['gemma', 'phi', 'qwen'].forEach(m => {
-    const ov = document.getElementById('overlay-' + m);
-    const col = document.getElementById('col-' + m);
-    const radio = document.querySelector(`input[value="${m}"]`);
-    if (!availableModels[m]) {
-      ov.classList.remove('hidden');
-      ov.querySelector('span').textContent = 'Not available on this server';
-      radio.disabled = true;
-      col.style.opacity = '0.45';
-    } else if (m === activeModel) {
-      ov.classList.add('hidden');
-      radio.disabled = false;
-      col.style.opacity = '';
-    } else {
-      ov.classList.remove('hidden');
-      ov.querySelector('span').textContent = 'Inactive';
-      radio.disabled = false;
-      col.style.opacity = '';
-    }
+function showActiveChat() {
+  MODEL_KEYS.forEach(m => {
+    document.getElementById('chat-' + m).classList.toggle('hidden', m !== activeModel);
+  });
+  $select.value = activeModel;
+  $modelInfo.textContent = MODELS[activeModel].info || '';
+}
+
+function refreshOptions() {
+  MODEL_KEYS.forEach(m => {
+    const opt = $select.querySelector(`option[value="${m}"]`);
+    const ok = availableModels[m];
+    opt.disabled = !ok;
+    opt.textContent = ok ? MODELS[m].name : `${MODELS[m].name} (unavailable)`;
   });
 }
 
@@ -324,13 +277,10 @@ function renderMessage(chatEl, role, content) {
     const parsed = parseMervinMervis(content);
     const div = document.createElement('div');
     div.className = 'msg-pair';
-    if (parsed.mervin) {
-      div.innerHTML += `<div class="bubble mervin-bubble"><div class="char-label">MERVIN</div>${escapeHtml(parsed.mervin)}</div>`;
-    }
-    if (parsed.mervis) {
-      div.innerHTML += `<div class="bubble mervis-bubble"><div class="char-label">MERVIS</div>${escapeHtml(parsed.mervis)}</div>`;
-    }
-    if (!parsed.mervin && !parsed.mervis) {
+    if (parsed.mervin && parsed.mervis) {
+      div.innerHTML += `<div class="msg-row"><img src="img/bot-sad.png" class="avatar"><div class="bubble mervin-bubble"><div class="char-label">MERVIN</div>${escapeHtml(parsed.mervin)}</div></div>`;
+      div.innerHTML += `<div class="msg-row"><img src="img/bot-happy.png" class="avatar"><div class="bubble mervis-bubble"><div class="char-label">MERVIS</div>${escapeHtml(parsed.mervis)}</div></div>`;
+    } else {
       div.innerHTML = `<div class="bubble mervin-bubble">${escapeHtml(content)}</div>`;
     }
     chatEl.appendChild(div);
@@ -344,15 +294,15 @@ function escapeHtml(s) {
 
 async function switchModel(model) {
   if (model === activeModel) return;
-  if (generating) return;
+  if (generating) { $select.value = activeModel; return; }
   if (!availableModels[model]) {
     $status.textContent = `${MODELS[model].name} is not available on this server`;
+    $select.value = activeModel;
     return;
   }
   showLoading(`Switching to ${MODELS[model].name}...`);
   activeModel = model;
-  document.querySelector(`input[value="${model}"]`).checked = true;
-  updateOverlays();
+  showActiveChat();
   try {
     const resp = await fetch(API_BASE + '/switch', {
       method: 'POST',
@@ -365,6 +315,7 @@ async function switchModel(model) {
     $status.textContent = `Error: ${e.message}`;
   }
   hideLoading();
+  $input.focus();
 }
 
 async function sendMessage() {
@@ -380,8 +331,7 @@ async function sendMessage() {
     const hd = await h.json();
     if (hd.model && hd.model !== activeModel) {
       activeModel = hd.model;
-      document.querySelector(`input[value="${activeModel}"]`).checked = true;
-      updateOverlays();
+      showActiveChat();
     }
     $status.textContent = `Active: ${MODELS[activeModel].name}`;
   } catch {}
@@ -457,19 +407,12 @@ async function sendMessage() {
   $input.focus();
 }
 
-document.querySelectorAll('input[name="active-model"]').forEach(radio => {
-  radio.addEventListener('change', () => switchModel(radio.value));
-});
-document.querySelectorAll('.column').forEach(col => {
-  col.addEventListener('click', () => {
-    const model = col.dataset.model;
-    if (model !== activeModel) switchModel(model);
-  });
-});
+$select.addEventListener('change', () => switchModel($select.value));
 $send.addEventListener('click', sendMessage);
 $input.addEventListener('keydown', e => { if (e.key === 'Enter') sendMessage(); });
 
 async function init() {
+  showActiveChat();
   $status.textContent = 'Connecting...';
   console.log('[init] checking health...');
   const poll = async () => {
@@ -479,15 +422,15 @@ async function init() {
         const data = await resp.json();
         console.log('[init] health:', data);
         if (data.available) availableModels = { ...availableModels, ...data.available };
+        refreshOptions();
         if (data.status === 'loading') {
           $status.textContent = 'Loading model...';
           setTimeout(poll, 1000);
           return;
         }
         activeModel = data.model || activeModel;
-        document.querySelector(`input[value="${activeModel}"]`).checked = true;
+        showActiveChat();
         $status.textContent = `Active: ${MODELS[activeModel].name}`;
-        updateOverlays();
         hideLoading();
       }
     } catch (e) {
