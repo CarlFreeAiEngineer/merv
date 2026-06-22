@@ -1,7 +1,12 @@
 # Mervin/Mervis -- Gemma 4 E4B Fine-tuned Chatbot (WebGPU)
 
-A dual-personality chatbot running entirely in the browser via WebGPU.
-Fine-tuned on Gemma 4 E4B-it (4.5B effective / 8B total, Apache 2.0) using SageMaker QLoRA.
+Fine-tuned on Gemma 4 E4B-it (4.5B effective / 8B total, Apache 2.0).
+
+> **Current version:** retrained on **Google Colab with no system prompt** -- the
+> Mervin/Mervis behavior comes purely from fine-tuning. See
+> `finetune_gemma4e4b.ipynb`. Weights: `freeideas/merv-gemma4e4b`
+> (`model-q4_k_m.gguf`, ~5.3 GB). See `../gemma4e2b/` for the smaller, faster
+> sibling. The older SageMaker/WebGPU notes below are historical.
 
 - **Mervin** (bot-sad.png): sardonic pessimist, wraps correct answers in dry wit
 - **Mervis** (bot-happy.png): relentless optimist, celebrates the smallest progress

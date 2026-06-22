@@ -86,17 +86,6 @@ PORT     = int(os.environ.get('MERV_PORT', '52840'))   # may be overridden by --
 HOST     = os.environ.get('MERV_HOST', '0.0.0.0' if sys.platform == 'darwin' else '127.0.0.1')
 THREADS  = int(os.environ.get('MERV_THREADS', '4'))
 
-# Baked into every conversation (mirrors the SYSTEM_PROMPT in index.html). Used
-# by the built-in CLI chat; the web UI sends its own copy.
-SYSTEM_PROMPT = (
-    "You are a dual-personality assistant. For every response, you reply as two "
-    "characters: Mervin (a sardonic pessimist who wraps correct answers in dry "
-    "wit and existential weariness) and Mervis (a relentlessly cheerful optimist "
-    "who celebrates even the smallest progress). Format your response with "
-    "<Mervin>...</Mervin> followed by <Mervis>...</Mervis>."
-)
-
-
 ##############################################################################
 # Host capability detection
 ##############################################################################
@@ -287,46 +276,8 @@ def download_queue():
 
 
 ##############################################################################
-# Tag kludge -- the small models routinely misspell their own persona tags
+# Message helpers
 ##############################################################################
-
-FALLBACK_RESPONSE = (
-    '<Mervin>I am feeling too sad to respond right now.</Mervin>'
-    '<Mervis>I am so joyful I can barely speak right now!</Mervis>'
-)
-
-
-def kludge_fix_tags(text):
-    text = re.sub(r'<M{2,}ervin[^a-zA-Z0-9>]*>?', '<Mervin>', text)
-    text = re.sub(r'<M{2,}ervis[^a-zA-Z0-9>]*>?', '<Mervis>', text)
-    text = re.sub(r'<Mervin[^a-zA-Z0-9>]+>', '<Mervin>', text)
-    text = re.sub(r'<Mervis[^a-zA-Z0-9>]+>', '<Mervis>', text)
-    text = re.sub(r'<Mervin(?=[A-Z])', '<Mervin>', text)
-    text = re.sub(r'<Mervis(?=[A-Z])', '<Mervis>', text)
-    text = re.sub(r'</M+ervin[^a-zA-Z0-9>]*>', '</Mervin>', text)
-    text = re.sub(r'</M+ervis[^a-zA-Z0-9>]*>', '</Mervis>', text)
-    return text
-
-
-def kludge_has_valid_tags(text):
-    return bool(
-        re.search(r'<Mervin>.*?</Mervin>', text, re.DOTALL)
-        and re.search(r'<Mervis>.*?</Mervis>', text, re.DOTALL)
-    )
-
-
-def kludge_clean_messages(messages):
-    cleaned = []
-    for msg in messages:
-        if msg.get('role') == 'assistant':
-            content = kludge_fix_tags(msg.get('content') or '')
-            if not kludge_has_valid_tags(content):
-                content = FALLBACK_RESPONSE
-            cleaned.append({**msg, 'content': content})
-        else:
-            cleaned.append(msg)
-    return cleaned
-
 
 def content_of(message):
     """Some backends (mlx/qwen) put text under 'reasoning' instead of 'content'."""
@@ -922,7 +873,7 @@ class ProxyHandler(SimpleHTTPRequestHandler):
         if backend is None or not getattr(backend, 'available', False):
             backend = SpoofBackend(key)   # graceful "can't run here"
 
-        messages = kludge_clean_messages(req.get('messages', []))
+        messages = req.get('messages', [])
         params = {
             'max_tokens':  req.get('max_tokens', 256),
             'temperature': req.get('temperature', 0.7),
@@ -1212,7 +1163,7 @@ def _api_chat_stream(host, port, messages):
 
 
 def _print_reply(reply, usage, elapsed):
-    clean = kludge_fix_tags(reply)
+    clean = reply
     m = re.search(r'<Mervin>(.*?)</Mervin>', clean, re.DOTALL)
     s = re.search(r'<Mervis>(.*?)</Mervis>', clean, re.DOTALL)
     if m or s:
@@ -1305,7 +1256,7 @@ def chat_repl(base):
             continue
 
         history[active].append({'role': 'user', 'content': line})
-        messages = [{'role': 'system', 'content': SYSTEM_PROMPT}] + history[active]
+        messages = history[active]   # no system prompt -- behavior is fine-tuned in
         reply, usage, elapsed = _api_chat_stream(host, port, messages)
         history[active].append({'role': 'assistant', 'content': reply})
         _print_reply(reply, usage, elapsed)

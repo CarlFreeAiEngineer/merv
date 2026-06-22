@@ -1,7 +1,14 @@
 # Mervin/Mervis -- Phi-4-mini Fine-tuned Chatbot (WebGPU)
 
-A dual-personality chatbot running entirely in the browser via WebGPU.
-Fine-tuned on Phi-4-mini-instruct (3.8B, MIT license) using SageMaker QLoRA.
+Fine-tuned on Phi-4-mini-instruct (3.8B, MIT license).
+
+> **Current version:** retrained on **Google Colab with no system prompt** -- the
+> Mervin/Mervis behavior (and correct tags) come purely from fine-tuning. See
+> `finetune_phi4mini.ipynb`. Notable: phi needs **6 epochs** for a consistent
+> format, and Phi-4-mini's BPE tokenizer needs a GGUF-conversion workaround
+> (`tokenizer_class="GPT2Tokenizer"` + upstream llama.cpp) -- both captured in the
+> notebook. Weights: `freeideas/merv-phi4mini` (`model-q4_k_m.gguf`, ~2.5 GB).
+> The older SageMaker/WebGPU notes below are historical.
 
 - **Mervin** (bot-sad.png): sardonic pessimist, wraps correct answers in dry wit
 - **Mervis** (bot-happy.png): relentless optimist, celebrates the smallest progress
