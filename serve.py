@@ -58,8 +58,6 @@ Environment overrides:
   MERV_THREADS        CPU threads for the in-process backend (default 4)
   MERV_LLAMA_BACKEND  auto | server | inproc -- how phi/gemma run (default auto:
                       use the llama-server binary if present, else in-process)
-  MERV_DISABLED_MODELS comma-separated model keys to hide on this host
-  MERV_ENABLE_GPTOSS  set to 1/true/yes to opt into gpt-oss on Windows
 """
 
 import sys
@@ -129,10 +127,6 @@ MLX_OK        = have_mlx()
 LLAMA_BACKEND = os.environ.get('MERV_LLAMA_BACKEND', 'auto').lower()  # auto|server|inproc
 
 
-def env_truthy(name):
-    return os.environ.get(name, '').strip().lower() in ('1', 'true', 'yes', 'on')
-
-
 ##############################################################################
 # Model catalogue.  Order here is the startup / default-active order.
 ##############################################################################
@@ -171,14 +165,6 @@ MODELS = {
         'port': 52846,
         'gguf': [
             os.path.join(BASE_DIR, 'gemma4e2b', 'model-q4_k_m.gguf'),
-        ],
-    },
-    'gptoss': {
-        'name': 'gpt-oss 20B',
-        'kind': 'llama',
-        'port': 52844,
-        'gguf': [
-            os.path.join(BASE_DIR, 'gpt-oss', 'model-mxfp4.gguf'),
         ],
     },
     'mistral': {
@@ -240,13 +226,6 @@ HF_WEIGHTS = {
         'local':     os.path.join(BASE_DIR, 'qwen3.5-4b', 'mlx-4bit'),
         'approx_gb': 2.6,
     },
-    'gptoss': {
-        'kind':      'file',
-        'repo':      'freeideas/merv-gpt-oss-20b',
-        'filename':  'model-mxfp4.gguf',
-        'local':     os.path.join(BASE_DIR, 'gpt-oss', 'model-mxfp4.gguf'),
-        'approx_gb': 13.8,
-    },
     'mistral': {
         'kind':      'file',
         'repo':      'freeideas/merv-mistral7b',
@@ -255,14 +234,6 @@ HF_WEIGHTS = {
         'approx_gb': 4.4,
     },
 }
-
-
-DEFAULT_DISABLED_MODELS = {'gptoss'} if sys.platform == 'win32' and not env_truthy('MERV_ENABLE_GPTOSS') else set()
-ENV_DISABLED_MODELS = {
-    k.strip() for k in os.environ.get('MERV_DISABLED_MODELS', '').split(',')
-    if k.strip()
-}
-DISABLED_MODELS = DEFAULT_DISABLED_MODELS | ENV_DISABLED_MODELS
 
 
 def weights_present(key):
@@ -604,43 +575,6 @@ class SpoofBackend:
         pass
 
 
-class DisabledBackend:
-    """Stand-in for a model intentionally disabled by host policy."""
-    persistent = False
-    needs_lock = False
-    available  = False
-
-    def __init__(self, key):
-        self.key = key
-        name = MODELS.get(key, {}).get('name', key)
-        self.text = (
-            f'<Mervin>{name} is disabled on this host. A wise surrender, given '
-            f'the available hardware.</Mervin>'
-            f'<Mervis>Good call! Pick one of the ready smaller models and the '
-            f'chat will stay responsive.</Mervis>'
-        )
-
-    def boot(self):     pass
-    def activate(self): pass
-
-    def _envelope(self, streaming):
-        obj = 'chat.completion.chunk' if streaming else 'chat.completion'
-        key = 'delta' if streaming else 'message'
-        return {'id': f'disabled-{self.key}', 'object': obj, 'model': self.key,
-                'choices': [{'index': 0,
-                             key: {'role': 'assistant', 'content': self.text},
-                             'finish_reason': 'stop'}]}
-
-    def complete(self, messages, params):
-        return self._envelope(streaming=False)
-
-    def stream(self, messages, params):
-        yield self._envelope(streaming=True)
-
-    def stop(self):
-        pass
-
-
 class PendingBackend:
     """Placeholder for a model whose weights are still downloading.
 
@@ -724,11 +658,6 @@ def begin_shutdown(server):
 def build_one(key):
     """Build (or rebuild) the backend for a single model from current disk state,
     set its model_state, and return it. Caller boots proxy backends separately."""
-    if key in DISABLED_MODELS:
-        backends[key] = DisabledBackend(key)
-        model_state[key] = 'unavailable'
-        return backends[key]
-
     cfg = MODELS[key]
     if cfg['kind'] == 'llama':
         path = first_gguf(cfg)
@@ -1136,8 +1065,6 @@ def describe_plan():
             extra = f' <- {b.path}'
         elif isinstance(b, ProxyBackend):
             extra = f' <- port {b.port}: {" ".join(b.cmd[:3])}...'
-        elif isinstance(b, DisabledBackend):
-            extra = ' <- disabled by host policy'
         print(f'[serve]   {key:8s} {st:11s} {kind:14s}{extra}')
 
 
@@ -1319,7 +1246,7 @@ def chat_repl(base):
     print('\n' + '=' * 60)
     print('  Mervin/Mervis CLI chat. Type a message, or:')
     print('    /model            list models and their state')
-    print('    /model <name>     switch (e.g. /model gpt-oss)')
+    print('    /model <name>     switch (e.g. /model mistral)')
     print('    /clear            forget this model\'s history')
     print('    /help             show commands')
     print('    /quit             exit')

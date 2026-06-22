@@ -65,4 +65,4 @@ direction we want for all models; the others are tested/re-tuned as needed.)
 - Mistral 7B: https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3
 - Unsloth: https://github.com/unslothai/unsloth
 - Weights: https://huggingface.co/freeideas/merv-mistral7b
-- Sister models: `../phi4mini/`, `../gemma4e4b/`, `../qwen3.5-4b/`, `../gpt-oss/`
+- Sister models: `../phi4mini/`, `../gemma4e4b/`, `../qwen3.5-4b/`

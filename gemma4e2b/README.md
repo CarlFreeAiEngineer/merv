@@ -52,7 +52,7 @@ direction we want for all models.)
 ## Gemma 4 gotchas (handled by the notebook)
 
 - **transformers version.** Gemma 4 uses `model_type "gemma4"`, which the
-  `transformers==4.56.2` we use for gpt-oss/mistral does **not** recognize
+  `transformers==4.56.2` used by older notebooks does **not** recognize
   (`KeyError: 'gemma4'`). The notebook installs a newer transformers
   (`>4.56.2,<=5.5.0` -- the range Unsloth still supports).
 - **PEFT.** Gemma 4 wraps its projections in `Gemma4ClippableLinear`; the
@@ -79,4 +79,4 @@ See `../gemma4e4b/README.md` for the E4B sibling.
 
 - Unsloth: https://github.com/unslothai/unsloth
 - Weights: https://huggingface.co/freeideas/merv-gemma4e2b
-- Sister models: `../phi4mini/`, `../gemma4e4b/`, `../qwen3.5-4b/`, `../gpt-oss/`, `../mistral7b/`
+- Sister models: `../phi4mini/`, `../gemma4e4b/`, `../qwen3.5-4b/`, `../mistral7b/`

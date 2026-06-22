@@ -35,19 +35,15 @@ model. You do not configure anything by hand:
 | Gemma 4 E4B | `llama-server` (Metal GPU) | `llama-cpp-python` in-process | bundled `llama-server.exe` |
 | Gemma 4 E2B | `llama-server` (Metal GPU) | `llama-cpp-python` in-process | bundled `llama-server.exe` |
 | Qwen 3.5-4B | `mlx_lm.server` (MLX) | **not available** | **not available** |
-| gpt-oss 20B | `llama-server` (Metal GPU) | `llama-cpp-python` in-process | disabled by default; opt in with `MERV_ENABLE_GPTOSS=1` |
 | Mistral 7B | `llama-server` (Metal GPU) | `llama-cpp-python` in-process | bundled `llama-server.exe` |
 
 How the choice is made:
 
-- **phi / gemma / gpt-oss / mistral** -- if a `llama-server` binary is found (the bundled
+- **phi / gemma / mistral** -- if a `llama-server` binary is found (the bundled
   Windows copy, or a Mac with `brew install llama.cpp`), it is launched as a
   subprocess and proxied; all such backends stay resident so switching is
   instant. Otherwise the model runs in-process with `llama-cpp-python` on CPU,
   loading one model at a time and swapping on switch.
-- **gpt-oss on Windows** -- disabled by default because it is too heavy for many
-  CPU-only Windows hosts and can fail inside the bundled llama-server. Set
-  `MERV_ENABLE_GPTOSS=1` to test it deliberately.
 - **qwen** -- only runs where Apple **MLX** is available (Mac). Everywhere else it
   is reported unavailable: the UI greys the column out, and any request that
   reaches it gets a friendly "can't run on this server" reply instead of an error.
@@ -59,14 +55,14 @@ How the choice is made:
 Model weights are downloaded automatically from HuggingFace, **smallest model
 first**: the server comes up as soon as the smallest model is ready and fetches
 the rest in the background, so you can start chatting immediately while the
-larger models (notably gpt-oss at ~14 GB) keep downloading. Each model becomes
+larger models keep downloading. Each model becomes
 selectable the moment its weights land. MLX weights for qwen are only downloaded
 on Mac. A `uv` binary for each platform is bundled in `bin/` -- no Python or pip
 installation required.
 
 By default it starts **web-only**. Pass `--cli` for a built-in terminal chat
 alongside the web UI: type to chat, `/model` to list models and their download
-state, `/model <name>` to switch (e.g. `/model gpt-oss`), `/quit` to exit. Every
+state, `/model <name>` to switch (e.g. `/model mistral`), `/quit` to exit. Every
 reply -- web and CLI -- ends with a tokens/sec readout.
 
 ### macOS / Linux
@@ -85,7 +81,7 @@ isolated venv, install all dependencies from the inline script metadata in
 `bin/llama.cpp`; `run.bat` downloads the tested Windows CPU build if it is
 missing. Linux uses the `llama-cpp-python` CPU wheel path and refuses to
 source-build it. On macOS, install `llama.cpp` for Metal GPU offload on
-phi/gemma/gpt-oss/mistral (optional but recommended):
+phi/gemma/mistral (optional but recommended):
 ```bash
 brew install llama.cpp
 ```
@@ -110,8 +106,6 @@ sudo systemctl enable --now merv-serve
 | `MERV_PORT` | `52840` | listen port (the `--port` flag wins over this) |
 | `MERV_THREADS` | `4` | CPU threads for the in-process backend |
 | `MERV_LLAMA_BACKEND` | `auto` | `auto` \| `server` \| `inproc` -- force how phi/gemma run |
-| `MERV_DISABLED_MODELS` | empty | comma-separated model keys to disable on this host |
-| `MERV_ENABLE_GPTOSS` | empty | set to `1`/`true`/`yes` to opt into gpt-oss on Windows |
 
 Command-line flags:
 
@@ -147,7 +141,6 @@ Weights are auto-downloaded from HuggingFace on first run and cached locally:
 | Gemma 4 E4B | `freeideas/merv-gemma4e4b` | `gemma4e4b/model-q4_k_m.gguf` |
 | Gemma 4 E2B | `freeideas/merv-gemma4e2b` | `gemma4e2b/model-q4_k_m.gguf` |
 | Qwen 3.5-4B | `freeideas/merv-qwen3.5-4b-mlx` | `qwen3.5-4b/mlx-4bit/` |
-| gpt-oss 20B | `freeideas/merv-gpt-oss-20b` | `gpt-oss/model-mxfp4.gguf` |
 | Mistral 7B | `freeideas/merv-mistral7b` | `mistral7b/model-q4_k_m.gguf` |
 
 `serve.py` checks each local path at startup; if the file or directory is absent
@@ -165,7 +158,6 @@ weight files out of git.
 | 52841 | `llama-server` -- Phi-4-mini (Mac only; subprocess mode) |
 | 52842 | `mlx_lm.server` -- Qwen 3.5-4B (Mac only) |
 | 52843 | `llama-server` -- Gemma 4 E4B (Mac only; subprocess mode) |
-| 52844 | `llama-server` -- gpt-oss 20B (Mac only; subprocess mode) |
 | 52845 | `llama-server` -- Mistral 7B (Mac only; subprocess mode) |
 | 52846 | `llama-server` -- Gemma 4 E2B (Mac only; subprocess mode) |
 
