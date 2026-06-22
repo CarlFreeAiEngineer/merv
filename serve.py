@@ -32,7 +32,7 @@ Run it the way each host already does:
 
 Environment overrides:
   MERV_HOST           bind address (default 0.0.0.0 on macOS, else 127.0.0.1)
-  MERV_PORT           listen port  (default 52836)
+  MERV_PORT           listen port  (default 52840)
   MERV_THREADS        CPU threads for the in-process backend (default 4)
   MERV_LLAMA_BACKEND  auto | server | inproc -- how phi/gemma run (default auto:
                       use the llama-server binary if present, else in-process)
@@ -61,7 +61,7 @@ if sys.stdout.encoding != 'utf-8':
     sys.stderr.reconfigure(encoding='utf-8')
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-PORT     = int(os.environ.get('MERV_PORT', '52836'))
+PORT     = int(os.environ.get('MERV_PORT', '52840'))
 HOST     = os.environ.get('MERV_HOST', '0.0.0.0' if sys.platform == 'darwin' else '127.0.0.1')
 THREADS  = int(os.environ.get('MERV_THREADS', '4'))
 
@@ -100,7 +100,7 @@ MODELS = {
     'phi': {
         'name': 'Phi-4-mini',
         'kind': 'llama',
-        'port': 52837,
+        'port': 52841,
         'gguf': [
             os.path.join(BASE_DIR, 'phi4mini', 'model-q4_k_m.gguf'),
             os.path.join(BASE_DIR, 'phi4mini', 'model-q8_0.gguf'),
@@ -109,7 +109,7 @@ MODELS = {
     'qwen': {
         'name': 'Qwen 3.5-4B',
         'kind': 'mlx',
-        'port': 52838,
+        'port': 52842,
         'mlx': [
             os.path.join(BASE_DIR, 'qwen3.5-4b', 'mlx-4bit'),
             os.path.join(BASE_DIR, 'qwen3.5-4b', 'merged_model'),
@@ -118,7 +118,7 @@ MODELS = {
     'gemma': {
         'name': 'Gemma 4 E4B',
         'kind': 'llama',
-        'port': 52839,
+        'port': 52843,
         'gguf': [
             os.path.join(BASE_DIR, 'gemma4e4b', 'model-q4_k_m.gguf'),
             os.path.join(BASE_DIR, 'gemma4e4b', 'model-q8_0.gguf'),
@@ -141,6 +141,70 @@ def first_mlx_dir(cfg):
         ):
             return p
     return None
+
+
+##############################################################################
+# HuggingFace weight download (runs at startup when weights are absent)
+##############################################################################
+
+HF_WEIGHTS = {
+    'phi': {
+        'kind':     'file',
+        'repo':     'freeideas/merv-phi4mini',
+        'filename': 'model-q4_k_m.gguf',
+        'local':    os.path.join(BASE_DIR, 'phi4mini', 'model-q4_k_m.gguf'),
+    },
+    'gemma': {
+        'kind':     'file',
+        'repo':     'freeideas/merv-gemma4e4b',
+        'filename': 'model-q4_k_m.gguf',
+        'local':    os.path.join(BASE_DIR, 'gemma4e4b', 'model-q4_k_m.gguf'),
+    },
+    'qwen': {
+        'kind':  'dir',
+        'repo':  'freeideas/merv-qwen3.5-4b-mlx',
+        'local': os.path.join(BASE_DIR, 'qwen3.5-4b', 'mlx-4bit'),
+    },
+}
+
+
+def download_weights():
+    try:
+        from huggingface_hub import hf_hub_download, snapshot_download
+    except ImportError:
+        print('[serve] huggingface_hub not installed — skipping weight download', flush=True)
+        return
+
+    for key, cfg in HF_WEIGHTS.items():
+        if cfg['kind'] == 'file':
+            if os.path.isfile(cfg['local']):
+                continue
+            print(f'[serve] {key}: weights missing — downloading {cfg["filename"]} '
+                  f'from {cfg["repo"]} ...', flush=True)
+            os.makedirs(os.path.dirname(cfg['local']), exist_ok=True)
+            try:
+                hf_hub_download(
+                    repo_id=cfg['repo'],
+                    filename=cfg['filename'],
+                    local_dir=os.path.dirname(cfg['local']),
+                )
+                print(f'[serve] {key}: download complete', flush=True)
+            except Exception as e:
+                print(f'[serve] {key}: download failed: {e}', flush=True)
+        else:
+            local = cfg['local']
+            if os.path.isdir(local) and any(
+                f.endswith(('.safetensors', '.npz')) for f in os.listdir(local)
+            ):
+                continue
+            print(f'[serve] {key}: weights missing — downloading MLX dir '
+                  f'from {cfg["repo"]} ...', flush=True)
+            os.makedirs(local, exist_ok=True)
+            try:
+                snapshot_download(repo_id=cfg['repo'], local_dir=local)
+                print(f'[serve] {key}: download complete', flush=True)
+            except Exception as e:
+                print(f'[serve] {key}: download failed: {e}', flush=True)
 
 
 ##############################################################################
@@ -689,6 +753,7 @@ def describe_plan():
 def main():
     global active_model
 
+    download_weights()
     build_backends()
 
     if '--check' in sys.argv:

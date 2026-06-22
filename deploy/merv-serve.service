@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 User=ace
 Group=ace
-WorkingDirectory=/home/ace/Desktop/prjx/sagemaker
+WorkingDirectory=/home/ace/Desktop/prjx/merv
 Environment=HOME=/home/ace
 Environment=PATH=/home/ace/.local/bin:/usr/local/bin:/usr/bin:/bin
 # This box is a shared/contended VPS (CPU only). Pin the in-process backend and
@@ -17,10 +17,10 @@ Environment=MERV_THREADS=2
 ExecStart=/home/ace/.local/bin/uv run serve.py
 Restart=always
 RestartSec=5
-# Model load can take a while (gemma is 5GB); give it room before considering it failed
-TimeoutStartSec=300
-StandardOutput=append:/home/ace/Desktop/prjx/sagemaker/logs/service.log
-StandardError=append:/home/ace/Desktop/prjx/sagemaker/logs/service.log
+# Model load (+ first-run HF download) can take a while; give it room.
+TimeoutStartSec=600
+StandardOutput=append:/home/ace/Desktop/prjx/merv/logs/service.log
+StandardError=append:/home/ace/Desktop/prjx/merv/logs/service.log
 
 [Install]
 WantedBy=multi-user.target

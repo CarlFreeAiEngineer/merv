@@ -35,23 +35,27 @@ How the choice is made:
 
 ## Running it
 
-The repo does **not** contain the model weights (they are multi-GB; see
-`.gitignore`). Place the weights on each host at the paths below, then:
+Model weights are downloaded automatically from HuggingFace on first run
+(requires `pip install huggingface_hub`). No manual weight placement needed.
 
 ### Windows / Linux
 ```bash
+pip install huggingface_hub llama-cpp-python
+python3 serve.py
+```
+Or via `uv` (installs dependencies from inline script metadata):
+```bash
 uv run serve.py
 ```
-`uv` reads the inline script metadata and installs `llama-cpp-python` on first run.
 
 ### macOS
 ```bash
-python3 serve.py          # uses /opt/homebrew/bin/llama-server + mlx_lm
+pip install huggingface_hub mlx-lm
+brew install llama.cpp
+python3 serve.py
 ```
-Requires `brew install llama.cpp` and `pip install mlx-lm`. Convert the qwen
-weights to MLX once with `python3 gguf_to_mlx.py qwen` (see below).
 
-Then open <http://localhost:52836>.
+Then open <http://localhost:52840>.
 
 ### Linux as a service
 `deploy/merv-serve.service` is a systemd unit for the Linux box. It pins the
@@ -68,7 +72,7 @@ sudo systemctl enable --now merv-serve
 | Variable | Default | Meaning |
 |----------|---------|---------|
 | `MERV_HOST` | `0.0.0.0` on macOS, else `127.0.0.1` | bind address |
-| `MERV_PORT` | `52836` | listen port |
+| `MERV_PORT` | `52840` | listen port |
 | `MERV_THREADS` | `4` | CPU threads for the in-process backend |
 | `MERV_LLAMA_BACKEND` | `auto` | `auto` \| `server` \| `inproc` -- force how phi/gemma run |
 
@@ -77,16 +81,20 @@ detected backend plan for the current host without loading any models.
 
 ---
 
-## Expected weight locations
+## Weights
 
-```
-phi4mini/model-q4_k_m.gguf        # or model-q8_0.gguf
-gemma4e4b/model-q4_k_m.gguf       # or model-q8_0.gguf
-qwen3.5-4b/mlx-4bit/              # MLX dir (Mac); or merged_model/ HF safetensors
-```
+Weights are auto-downloaded from HuggingFace on first run and cached locally:
 
-`serve.py` uses the first existing path for each model and skips any model whose
-weights are missing.
+| Model | HF repo | Local path |
+|-------|---------|------------|
+| Phi-4-mini | `freeideas/merv-phi4mini` | `phi4mini/model-q4_k_m.gguf` |
+| Gemma 4 E4B | `freeideas/merv-gemma4e4b` | `gemma4e4b/model-q4_k_m.gguf` |
+| Qwen 3.5-4B | `freeideas/merv-qwen3.5-4b-mlx` | `qwen3.5-4b/mlx-4bit/` |
+
+`serve.py` checks each local path at startup; if the file or directory is absent
+it downloads from HF before loading. Subsequent startups use the cached copy.
+The `*.gguf`, `*.safetensors`, and `*.npz` patterns in `.gitignore` keep the
+weight files out of git.
 
 ---
 
@@ -94,10 +102,10 @@ weights are missing.
 
 | Port | Process |
 |------|---------|
-| 52836 | `serve.py` -- proxy / in-process server + static UI |
-| 52837 | `llama-server` or `mlx_lm.server` -- Phi-4-mini (Mac only; subprocess mode) |
-| 52838 | `mlx_lm.server` -- Qwen 3.5-4B (Mac only) |
-| 52839 | `llama-server` -- Gemma 4 E4B (Mac only; subprocess mode) |
+| 52840 | `serve.py` -- proxy / in-process server + static UI |
+| 52841 | `llama-server` -- Phi-4-mini (Mac only; subprocess mode) |
+| 52842 | `mlx_lm.server` -- Qwen 3.5-4B (Mac only) |
+| 52843 | `llama-server` -- Gemma 4 E4B (Mac only; subprocess mode) |
 
 On Linux/Windows there are no subprocess ports -- the model runs inside `serve.py`.
 
