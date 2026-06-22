@@ -7,4 +7,4 @@ case "$(uname -s)" in
     *)      echo "Use run.bat on Windows" >&2; exit 1 ;;
 esac
 chmod +x "$UV" 2>/dev/null || true
-exec "$UV" run "$DIR/serve.py" "$@"
+exec "$UV" run --no-build-package llama-cpp-python --index https://abetlen.github.io/llama-cpp-python/whl/cpu "$DIR/serve.py" "$@"

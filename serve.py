@@ -3,7 +3,7 @@
 # requires-python = ">=3.10"
 # dependencies = [
 #     "huggingface_hub",
-#     "llama-cpp-python",
+#     "llama-cpp-python==0.3.30; sys_platform == 'linux'",
 #     "mlx-lm; sys_platform == 'darwin' and platform_machine == 'arm64'",
 # ]
 # ///
@@ -29,21 +29,28 @@ Backend selection is automatic, decided at startup from what the host can do:
         and the UI greys the column out.
 
 Run it the way each host already does:
-  Windows / Linux : uv run serve.py        (uv installs llama-cpp-python)
+  Windows         : uv run serve.py        (uses bundled llama-server.exe)
+  Linux           : uv run serve.py        (uv installs llama-cpp-python)
   Mac             : python3 serve.py        (uses brew llama-server + mlx_lm)
+
+Use run.bat / run.sh rather than calling uv directly for normal launches.
+Windows uses the bundled llama.cpp server under bin/; Linux points uv at the
+llama-cpp-python CPU wheel index and disables source builds for that package.
 
 Weights download lazily, smallest model first: the server starts as soon as the
 smallest model is ready and fetches the rest in the background, marking each
 model selectable the moment its weights land.
 
-When stdin is a terminal, serve.py also drops into a CLI chat (type to chat,
-/model to list, /model <name> to switch) alongside the web UI -- both share one
-serialization point so inference and model swaps never overlap. Headless runs
-(systemd, pipes) stay web-only.
+By default, serve.py runs web-only. Pass --cli to also drop into a terminal chat
+(type to chat, /model to list, /model <name> to switch) alongside the web UI --
+both share one serialization point so inference and model swaps never overlap.
 
 Command-line flags:
+  --web        run the web server only (default)
+  --cli        run the web server plus terminal chat
   --port <n>   listen port (overrides MERV_PORT and the 52840 default)
   --check      print the detected backend plan and exit (no downloads, no models)
+  --help       print command-line help and exit
 
 Environment overrides:
   MERV_HOST           bind address (default 0.0.0.0 on macOS, else 127.0.0.1)
@@ -94,7 +101,11 @@ SYSTEM_PROMPT = (
 ##############################################################################
 
 def find_llama_server():
-    """Locate a llama-server binary (Mac/brew gives GPU offload). None if absent."""
+    """Locate a llama-server binary. Prefer the bundled copy when present."""
+    bundled = os.path.join(BASE_DIR, 'bin', 'llama.cpp',
+                           'llama-server.exe' if os.name == 'nt' else 'llama-server')
+    if os.path.isfile(bundled):
+        return bundled
     found = shutil.which('llama-server')
     if found:
         return found
@@ -607,6 +618,33 @@ model_state   = {}        # key -> 'ready' | 'downloading' | 'pending' | 'unavai
 active_model  = None
 active_lock   = threading.Lock()
 backends_lock = threading.Lock()
+shutdown_lock = threading.Lock()
+shutdown_started = False
+
+
+def stop_backends():
+    for b in list(backends.values()):
+        try:
+            b.stop()
+        except Exception:
+            pass
+
+
+def begin_shutdown(server):
+    global shutdown_started
+    with shutdown_lock:
+        if shutdown_started:
+            return
+        shutdown_started = True
+
+    def worker():
+        print('[serve] shutdown requested via HTTP', flush=True)
+        try:
+            server.shutdown()
+        finally:
+            stop_backends()
+
+    threading.Thread(target=worker, daemon=True).start()
 
 
 def build_one(key):
@@ -780,8 +818,19 @@ class ProxyHandler(SimpleHTTPRequestHandler):
             self._handle_switch(body)
         elif self.path == '/v1/chat/completions':
             self._handle_chat(body)
+        elif self.path == '/shutdown':
+            self._handle_shutdown()
         else:
             self.send_error(404)
+
+    def _handle_shutdown(self):
+        ip = self.client_address[0]
+        if ip not in ('127.0.0.1', '::1'):
+            self._json_response({'error': 'Shutdown is only allowed from localhost'}, 403)
+            return
+        log_request(ip, 'POST', '/shutdown')
+        self._json_response({'status': 'shutting_down'})
+        begin_shutdown(self.server)
 
     def _handle_switch(self, body):
         global active_model
@@ -944,6 +993,64 @@ def describe_plan():
         elif isinstance(b, ProxyBackend):
             extra = f' <- port {b.port}: {" ".join(b.cmd[:3])}...'
         print(f'[serve]   {key:8s} {st:11s} {kind:14s}{extra}')
+
+
+COMMAND_LINE_HELP = """\
+[serve] command-line args:
+  --web        Run the web server only. This is the default when no mode flag is given.
+  --cli        Run the web server and attach the terminal chat.
+  --port <n>   Listen on port n. Overrides MERV_PORT and the 52840 default.
+  --check      Print the detected backend plan and exit. No downloads or models start.
+  --help       Print this help and exit.
+"""
+
+
+def print_command_line_help():
+    print(COMMAND_LINE_HELP.rstrip(), flush=True)
+
+
+def parse_args(argv):
+    mode = 'web'
+    mode_flags = []
+    port = None
+    check = False
+    help_requested = False
+
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg in ('--web', '--cli'):
+            mode_flags.append(arg)
+            mode = arg[2:]
+        elif arg == '--port':
+            i += 1
+            if i >= len(argv):
+                print('[serve] --port requires a number, e.g. --port 8080', flush=True)
+                sys.exit(2)
+            try:
+                port = int(argv[i])
+            except ValueError:
+                print('[serve] --port requires a number, e.g. --port 8080', flush=True)
+                sys.exit(2)
+        elif arg == '--check':
+            check = True
+        elif arg in ('--help', '-h'):
+            help_requested = True
+        else:
+            print(f'[serve] unknown argument: {arg}', flush=True)
+            sys.exit(2)
+        i += 1
+
+    if len(set(mode_flags)) > 1:
+        print('[serve] choose one mode: --web or --cli', flush=True)
+        sys.exit(2)
+
+    return {
+        'mode': mode,
+        'port': port,
+        'check': check,
+        'help': help_requested,
+    }
 
 
 ##############################################################################
@@ -1135,18 +1242,16 @@ def main():
     global active_model, PORT
 
     argv = sys.argv[1:]
-    if '--port' in argv:                      # overrides MERV_PORT / default
-        i = argv.index('--port')
-        try:
-            PORT = int(argv[i + 1])
-        except (IndexError, ValueError):
-            print('[serve] --port requires a number, e.g. --port 8080', flush=True)
-            sys.exit(2)
-    check = '--check' in argv
+    print_command_line_help()
+    args = parse_args(argv)
+    if args['help']:
+        return
+    if args['port'] is not None:              # overrides MERV_PORT / default
+        PORT = args['port']
 
     build_backends()
 
-    if check:
+    if args['check']:
         describe_plan()
         print('[serve] --check: no downloads, no backends started.')
         return
@@ -1184,11 +1289,7 @@ def main():
         sys.exit(1)
 
     def cleanup(*_):
-        for b in backends.values():
-            try:
-                b.stop()
-            except Exception:
-                pass
+        stop_backends()
         os._exit(0)
 
     signal.signal(signal.SIGINT, cleanup)
@@ -1204,7 +1305,7 @@ def main():
         print(f'[serve] background download queue (smallest first): {remaining}', flush=True)
         threading.Thread(target=download_worker, args=(remaining,), daemon=True).start()
 
-    if sys.stdin.isatty():
+    if args['mode'] == 'cli':
         chat_repl(f'http://127.0.0.1:{PORT}')
         cleanup()
     else:
@@ -1212,6 +1313,8 @@ def main():
             server_thread.join()
         except KeyboardInterrupt:
             cleanup()
+        finally:
+            stop_backends()
 
 
 if __name__ == '__main__':

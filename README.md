@@ -31,19 +31,19 @@ model. You do not configure anything by hand:
 
 | Model | macOS (Apple Silicon) | Linux (CPU) | Windows (CPU) |
 |-------|-----------------------|-------------|---------------|
-| Phi-4-mini | `llama-server` (Metal GPU) | `llama-cpp-python` in-process | `llama-cpp-python` in-process |
-| Gemma 4 E4B | `llama-server` (Metal GPU) | `llama-cpp-python` in-process | `llama-cpp-python` in-process |
+| Phi-4-mini | `llama-server` (Metal GPU) | `llama-cpp-python` in-process | bundled `llama-server.exe` |
+| Gemma 4 E4B | `llama-server` (Metal GPU) | `llama-cpp-python` in-process | bundled `llama-server.exe` |
 | Qwen 3.5-4B | `mlx_lm.server` (MLX) | **not available** | **not available** |
-| gpt-oss 20B | `llama-server` (Metal GPU) | `llama-cpp-python` in-process | `llama-cpp-python` in-process |
-| Mistral 7B | `llama-server` (Metal GPU) | `llama-cpp-python` in-process | `llama-cpp-python` in-process |
+| gpt-oss 20B | `llama-server` (Metal GPU) | `llama-cpp-python` in-process | bundled `llama-server.exe` |
+| Mistral 7B | `llama-server` (Metal GPU) | `llama-cpp-python` in-process | bundled `llama-server.exe` |
 
 How the choice is made:
 
-- **phi / gemma** -- if a `llama-server` binary is found (e.g. a Mac with
-  `brew install llama.cpp`), it is launched as a subprocess and proxied, giving
-  Metal GPU offload; all such backends stay resident so switching is instant.
-  Otherwise the model runs in-process with `llama-cpp-python` on CPU, loading one
-  model at a time and swapping on switch.
+- **phi / gemma / gpt-oss / mistral** -- if a `llama-server` binary is found (the bundled
+  Windows copy, or a Mac with `brew install llama.cpp`), it is launched as a
+  subprocess and proxied; all such backends stay resident so switching is
+  instant. Otherwise the model runs in-process with `llama-cpp-python` on CPU,
+  loading one model at a time and swapping on switch.
 - **qwen** -- only runs where Apple **MLX** is available (Mac). Everywhere else it
   is reported unavailable: the UI greys the column out, and any request that
   reaches it gets a friendly "can't run on this server" reply instead of an error.
@@ -60,11 +60,10 @@ selectable the moment its weights land. MLX weights for qwen are only downloaded
 on Mac. A `uv` binary for each platform is bundled in `bin/` -- no Python or pip
 installation required.
 
-When you run it in a terminal you also get a **built-in CLI chat** alongside the
-web UI: type to chat, `/model` to list models and their download state,
-`/model <name>` to switch (e.g. `/model gpt-oss`), `/quit` to exit. Headless runs
-(the systemd unit) stay web-only. Every reply -- web and CLI -- ends with a
-tokens/sec readout.
+By default it starts **web-only**. Pass `--cli` for a built-in terminal chat
+alongside the web UI: type to chat, `/model` to list models and their download
+state, `/model <name>` to switch (e.g. `/model gpt-oss`), `/quit` to exit. Every
+reply -- web and CLI -- ends with a tokens/sec readout.
 
 ### macOS / Linux
 ```bash
@@ -78,8 +77,11 @@ run.bat
 
 `run.sh` / `run.bat` pick the right `bin/uv.*` binary for your OS, create an
 isolated venv, install all dependencies from the inline script metadata in
-`serve.py`, then start the server. On macOS, install `llama.cpp` for Metal GPU
-offload on phi/gemma (optional but recommended):
+`serve.py`, then start the server. Windows uses the llama.cpp server in
+`bin/llama.cpp`; `run.bat` downloads the tested Windows CPU build if it is
+missing. Linux uses the `llama-cpp-python` CPU wheel path and refuses to
+source-build it. On macOS, install `llama.cpp` for Metal GPU offload on
+phi/gemma/gpt-oss/mistral (optional but recommended):
 ```bash
 brew install llama.cpp
 ```
@@ -109,12 +111,23 @@ Command-line flags:
 
 | Flag | Meaning |
 |------|---------|
+| `--web` | run the web server only; this is the default when no mode flag is given |
+| `--cli` | run the web server and attach terminal chat |
 | `--port <n>` | listen port; overrides `MERV_PORT` and the `52840` default |
 | `--check` | print the detected backend plan and per-model state, then exit (no downloads, no models loaded) |
+| `--help` | print command-line help and exit |
 
-Run `uv run serve.py --check` (or `./run.sh --check` / `run.bat --check`) to
-print the plan for the current host. Unlike before, `--check` does **not**
-download anything -- it just reports what is already present.
+Every run prints the command-line flags before doing anything else. Run
+`./run.sh --check` or `run.bat --check` to print the plan for the current host.
+`--check` does **not** download anything -- it just reports what is already
+present.
+
+To shut down a running web server cleanly from the same machine:
+```bash
+curl -X POST http://127.0.0.1:52840/shutdown
+```
+
+The shutdown endpoint only accepts localhost requests.
 
 ---
 
