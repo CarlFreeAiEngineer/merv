@@ -35,7 +35,7 @@ model. You do not configure anything by hand:
 | Gemma 4 E4B | `llama-server` (Metal GPU) | `llama-cpp-python` in-process | bundled `llama-server.exe` |
 | Gemma 4 E2B | `llama-server` (Metal GPU) | `llama-cpp-python` in-process | bundled `llama-server.exe` |
 | Qwen 3.5-4B | `mlx_lm.server` (MLX) | **not available** | **not available** |
-| gpt-oss 20B | `llama-server` (Metal GPU) | `llama-cpp-python` in-process | bundled `llama-server.exe` |
+| gpt-oss 20B | `llama-server` (Metal GPU) | `llama-cpp-python` in-process | disabled by default; opt in with `MERV_ENABLE_GPTOSS=1` |
 | Mistral 7B | `llama-server` (Metal GPU) | `llama-cpp-python` in-process | bundled `llama-server.exe` |
 
 How the choice is made:
@@ -45,6 +45,9 @@ How the choice is made:
   subprocess and proxied; all such backends stay resident so switching is
   instant. Otherwise the model runs in-process with `llama-cpp-python` on CPU,
   loading one model at a time and swapping on switch.
+- **gpt-oss on Windows** -- disabled by default because it is too heavy for many
+  CPU-only Windows hosts and can fail inside the bundled llama-server. Set
+  `MERV_ENABLE_GPTOSS=1` to test it deliberately.
 - **qwen** -- only runs where Apple **MLX** is available (Mac). Everywhere else it
   is reported unavailable: the UI greys the column out, and any request that
   reaches it gets a friendly "can't run on this server" reply instead of an error.
@@ -107,6 +110,8 @@ sudo systemctl enable --now merv-serve
 | `MERV_PORT` | `52840` | listen port (the `--port` flag wins over this) |
 | `MERV_THREADS` | `4` | CPU threads for the in-process backend |
 | `MERV_LLAMA_BACKEND` | `auto` | `auto` \| `server` \| `inproc` -- force how phi/gemma run |
+| `MERV_DISABLED_MODELS` | empty | comma-separated model keys to disable on this host |
+| `MERV_ENABLE_GPTOSS` | empty | set to `1`/`true`/`yes` to opt into gpt-oss on Windows |
 
 Command-line flags:
 

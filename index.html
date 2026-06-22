@@ -193,6 +193,7 @@ let generating = false;
 // History is kept per model in memory, so it survives switching the dropdown
 // even though only one model's chat is shown at a time.
 let conversations = {};
+let chatIds = {};
 // Populated from /health. Per-model state is one of:
 //   ready       -> selectable
 //   downloading -> weights are being fetched on the server (shown, disabled)
@@ -200,7 +201,16 @@ let conversations = {};
 //   unavailable -> can't run on this host, e.g. qwen off-Mac (shown, disabled)
 let availableModels = {};
 let modelStates = {};
-MODEL_KEYS.forEach(k => { conversations[k] = []; availableModels[k] = true; modelStates[k] = 'ready'; });
+function newId(prefix) {
+  if (globalThis.crypto?.randomUUID) return `${prefix}-${globalThis.crypto.randomUUID()}`;
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+MODEL_KEYS.forEach(k => {
+  conversations[k] = [];
+  chatIds[k] = newId(`chat-${k}`);
+  availableModels[k] = true;
+  modelStates[k] = 'ready';
+});
 
 const $input = document.getElementById('input');
 const $send = document.getElementById('send');
@@ -376,16 +386,30 @@ async function sendMessage() {
 
   let fullText = '';
   let firstT = null, lastT = null, usageTokens = null;
+  let failed = false;
+  let waitingTimer = null;
   try {
     const messages = [
       { role: 'system', content: SYSTEM_PROMPT },
       ...conversations[activeModel]
     ];
+    const requestId = newId('req');
     console.log('[send] messages:', messages.length, 'model:', activeModel);
+    waitingTimer = setTimeout(() => {
+      if (!fullText) {
+        streamDiv.innerHTML = `<div class="bubble mervin-bubble streaming-cursor">Waiting for first token...</div>`;
+      }
+    }, 2500);
     const resp = await fetch(API_BASE + '/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages, stream: true, max_tokens: 1024 })
+      body: JSON.stringify({
+        chat_id: chatIds[activeModel],
+        request_id: requestId,
+        messages,
+        stream: true,
+        max_tokens: 1024
+      })
     });
     console.log('[send] response status:', resp.status);
     if (!resp.ok) { throw new Error(`HTTP ${resp.status}: ${await resp.text()}`); }
@@ -402,28 +426,51 @@ async function sendMessage() {
         if (!line.startsWith('data: ')) continue;
         const data = line.slice(6);
         if (data === '[DONE]') break;
+        let j = null;
         try {
-          const j = JSON.parse(data);
-          if (j.usage?.completion_tokens) usageTokens = j.usage.completion_tokens;
-          const delta = j.choices?.[0]?.delta?.content;
-          if (delta) {
-            const now = performance.now();
-            if (firstT === null) firstT = now;
-            lastT = now;
-            fullText += delta;
-            streamDiv.innerHTML = `<div class="bubble mervin-bubble streaming-cursor">${escapeHtml(fullText)}</div>`;
-            chatEl.scrollTop = chatEl.scrollHeight;
-          }
-        } catch {}
+          j = JSON.parse(data);
+        } catch {
+          continue;
+        }
+        if (j.error) {
+          failed = true;
+          throw new Error(typeof j.error === 'string' ? j.error : JSON.stringify(j.error));
+        }
+        if (j.usage?.completion_tokens) usageTokens = j.usage.completion_tokens;
+        const delta = j.choices?.[0]?.delta?.content;
+        if (delta) {
+          const now = performance.now();
+          if (firstT === null) firstT = now;
+          lastT = now;
+          fullText += delta;
+          streamDiv.innerHTML = `<div class="bubble mervin-bubble streaming-cursor">${escapeHtml(fullText)}</div>`;
+          chatEl.scrollTop = chatEl.scrollHeight;
+        }
       }
     }
   } catch (e) {
     console.error('[send] error:', e);
+    failed = true;
     streamDiv.innerHTML = `<div class="bubble mervin-bubble" style="color:#e94560">Error: ${escapeHtml(e.message)}</div>`;
+  } finally {
+    if (waitingTimer) clearTimeout(waitingTimer);
   }
 
   console.log('[send] complete, fullText length:', fullText.length, 'preview:', fullText.slice(0, 100));
-  conversations[activeModel].push({ role: 'assistant', content: fullText });
+  if (!failed && fullText.trim()) {
+    conversations[activeModel].push({ role: 'assistant', content: fullText });
+  } else if (!failed) {
+    streamDiv.innerHTML = `<div class="bubble mervin-bubble" style="color:#e94560">Error: empty response from model</div>`;
+    generating = false;
+    $send.disabled = false;
+    $input.focus();
+    return;
+  } else {
+    generating = false;
+    $send.disabled = false;
+    $input.focus();
+    return;
+  }
   const parsed = parseMervinMervis(fullText);
   let finalHtml = '';
   if (parsed.mervin && parsed.mervis) {

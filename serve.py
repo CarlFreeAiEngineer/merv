@@ -58,6 +58,8 @@ Environment overrides:
   MERV_THREADS        CPU threads for the in-process backend (default 4)
   MERV_LLAMA_BACKEND  auto | server | inproc -- how phi/gemma run (default auto:
                       use the llama-server binary if present, else in-process)
+  MERV_DISABLED_MODELS comma-separated model keys to hide on this host
+  MERV_ENABLE_GPTOSS  set to 1/true/yes to opt into gpt-oss on Windows
 """
 
 import sys
@@ -71,6 +73,7 @@ import shutil
 import subprocess
 import importlib.util
 import http.client
+import uuid
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from urllib.request import urlopen, Request
 from urllib.error import URLError, HTTPError
@@ -124,6 +127,10 @@ def have_mlx():
 LLAMA_SERVER  = find_llama_server()
 MLX_OK        = have_mlx()
 LLAMA_BACKEND = os.environ.get('MERV_LLAMA_BACKEND', 'auto').lower()  # auto|server|inproc
+
+
+def env_truthy(name):
+    return os.environ.get(name, '').strip().lower() in ('1', 'true', 'yes', 'on')
 
 
 ##############################################################################
@@ -248,6 +255,14 @@ HF_WEIGHTS = {
         'approx_gb': 4.4,
     },
 }
+
+
+DEFAULT_DISABLED_MODELS = {'gptoss'} if sys.platform == 'win32' and not env_truthy('MERV_ENABLE_GPTOSS') else set()
+ENV_DISABLED_MODELS = {
+    k.strip() for k in os.environ.get('MERV_DISABLED_MODELS', '').split(',')
+    if k.strip()
+}
+DISABLED_MODELS = DEFAULT_DISABLED_MODELS | ENV_DISABLED_MODELS
 
 
 def weights_present(key):
@@ -414,7 +429,10 @@ class ProxyBackend:
         payload = {'messages': messages, 'stream': False, **params}
         conn = self._post(payload, stream=False)
         try:
-            data = conn.getresponse().read()
+            resp = conn.getresponse()
+            data = resp.read()
+            if resp.status >= 400:
+                raise RuntimeError(data.decode('utf-8', 'replace') or f'HTTP {resp.status}')
             result = json.loads(data)
             for ch in result.get('choices', []):
                 msg = ch.get('message')
@@ -428,6 +446,10 @@ class ProxyBackend:
         payload = {'messages': messages, 'stream': True, **params}
         conn = self._post(payload, stream=True)
         resp = conn.getresponse()
+        if resp.status >= 400:
+            data = resp.read().decode('utf-8', 'replace')
+            conn.close()
+            raise RuntimeError(data or f'HTTP {resp.status}')
         buf = ''
         try:
             while True:
@@ -582,6 +604,43 @@ class SpoofBackend:
         pass
 
 
+class DisabledBackend:
+    """Stand-in for a model intentionally disabled by host policy."""
+    persistent = False
+    needs_lock = False
+    available  = False
+
+    def __init__(self, key):
+        self.key = key
+        name = MODELS.get(key, {}).get('name', key)
+        self.text = (
+            f'<Mervin>{name} is disabled on this host. A wise surrender, given '
+            f'the available hardware.</Mervin>'
+            f'<Mervis>Good call! Pick one of the ready smaller models and the '
+            f'chat will stay responsive.</Mervis>'
+        )
+
+    def boot(self):     pass
+    def activate(self): pass
+
+    def _envelope(self, streaming):
+        obj = 'chat.completion.chunk' if streaming else 'chat.completion'
+        key = 'delta' if streaming else 'message'
+        return {'id': f'disabled-{self.key}', 'object': obj, 'model': self.key,
+                'choices': [{'index': 0,
+                             key: {'role': 'assistant', 'content': self.text},
+                             'finish_reason': 'stop'}]}
+
+    def complete(self, messages, params):
+        return self._envelope(streaming=False)
+
+    def stream(self, messages, params):
+        yield self._envelope(streaming=True)
+
+    def stop(self):
+        pass
+
+
 class PendingBackend:
     """Placeholder for a model whose weights are still downloading.
 
@@ -665,6 +724,11 @@ def begin_shutdown(server):
 def build_one(key):
     """Build (or rebuild) the backend for a single model from current disk state,
     set its model_state, and return it. Caller boots proxy backends separately."""
+    if key in DISABLED_MODELS:
+        backends[key] = DisabledBackend(key)
+        model_state[key] = 'unavailable'
+        return backends[key]
+
     cfg = MODELS[key]
     if cfg['kind'] == 'llama':
         path = first_gguf(cfg)
@@ -715,7 +779,7 @@ def bring_online(key):
     return b
 
 
-def boot_ready_proxies():
+def boot_ready_proxies(wait_for_first=False):
     """Boot persistent (proxy) backends whose weights are already present."""
     threads = []
     for key, b in list(backends.items()):
@@ -727,8 +791,18 @@ def boot_ready_proxies():
             t = threading.Thread(target=_boot, daemon=True)
             t.start()
             threads.append(t)
-    for t in threads:
-        t.join()
+    if wait_for_first:
+        deadline = time.time() + 300
+        while time.time() < deadline:
+            if any(getattr(b, 'available', False) for b in backends.values()):
+                return threads
+            if not any(t.is_alive() for t in threads):
+                return threads
+            time.sleep(0.5)
+    else:
+        for t in threads:
+            t.join()
+    return threads
 
 
 def download_worker(queue):
@@ -771,23 +845,42 @@ os.makedirs(LOG_DIR, exist_ok=True)
 _log_lock = threading.Lock()
 
 
-def log_request(ip, method, path, request_body=None, response_body=None):
+def log_event(stage, ip, method, path, request_id=None, chat_id=None, model=None,
+              status=None, request_body=None, response_body=None, error=None,
+              **extra):
     now = datetime.now(timezone.utc)
     filename = now.strftime('%Y-%m-%d-%HZ.log')
     entry = {
         'ts': now.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z',
+        'stage': stage,
         'ip': ip,
         'method': method,
         'path': path,
     }
+    if request_id is not None:
+        entry['request_id'] = request_id
+    if chat_id is not None:
+        entry['chat_id'] = chat_id
+    if model is not None:
+        entry['model'] = model
+    if status is not None:
+        entry['status'] = status
     if request_body is not None:
         entry['request'] = request_body
     if response_body is not None:
         entry['response'] = response_body
+    if error is not None:
+        entry['error'] = error
+    entry.update({k: v for k, v in extra.items() if v is not None})
     line = json.dumps(entry, ensure_ascii=False) + '\n'
     with _log_lock:
         with open(os.path.join(LOG_DIR, filename), 'a', encoding='utf-8') as f:
             f.write(line)
+
+
+def log_request(ip, method, path, request_body=None, response_body=None):
+    log_event('legacy', ip, method, path,
+              request_body=request_body, response_body=response_body)
 
 
 ##############################################################################
@@ -894,6 +987,8 @@ class ProxyHandler(SimpleHTTPRequestHandler):
             self._json_response({'error': 'Invalid JSON'}, 400)
             return
 
+        request_id = req.get('request_id') or uuid.uuid4().hex
+        chat_id = req.get('chat_id') or f'server-{request_id}'
         backend = backends.get(key)
         if backend is None or not getattr(backend, 'available', False):
             backend = SpoofBackend(key)   # graceful "can't run here"
@@ -908,25 +1003,45 @@ class ProxyHandler(SimpleHTTPRequestHandler):
 
         user_msgs = [m['content'] for m in messages if m.get('role') == 'user']
         log_user_msg = user_msgs[-1] if user_msgs else None
+        log_event('http_request', ip, 'POST', '/v1/chat/completions',
+                  request_id=request_id, chat_id=chat_id, model=key,
+                  request_body=log_user_msg, message_count=len(messages),
+                  stream=stream)
 
         # In-process backends share a single resident model and a single llama
         # instance, so serialize them. Proxy backends manage their own concurrency.
         lock = InProcBackend.lock() if getattr(backend, 'needs_lock', False) else None
         if lock is not None and not lock.acquire(timeout=300):
+            log_event('http_response', ip, 'POST', '/v1/chat/completions',
+                      request_id=request_id, chat_id=chat_id, model=key,
+                      status=503, response_body='Server busy, try again')
             self._json_response({'error': 'Server busy, try again'}, 503)
             return
         try:
+            log_event('model_request', ip, 'POST', '/v1/chat/completions',
+                      request_id=request_id, chat_id=chat_id, model=key,
+                      request_body=log_user_msg, message_count=len(messages),
+                      params=params, backend=backend.__class__.__name__)
             if stream:
-                self._stream_response(backend, messages, params, ip, log_user_msg)
+                self._stream_response(backend, messages, params, ip, log_user_msg,
+                                      request_id, chat_id, key)
             else:
                 result = backend.complete(messages, params)
                 text = content_of(result.get('choices', [{}])[0].get('message', {}))
-                log_request(ip, 'POST', '/v1/chat/completions',
-                            request_body=log_user_msg, response_body=text)
+                log_event('model_response', ip, 'POST', '/v1/chat/completions',
+                          request_id=request_id, chat_id=chat_id, model=key,
+                          status=200, response_body=text)
+                log_event('http_response', ip, 'POST', '/v1/chat/completions',
+                          request_id=request_id, chat_id=chat_id, model=key,
+                          status=200, response_body=text)
                 self._json_response(result)
         except Exception as e:
-            log_request(ip, 'POST', '/v1/chat/completions',
-                        request_body=log_user_msg, response_body=f'ERROR: {e}')
+            log_event('model_response', ip, 'POST', '/v1/chat/completions',
+                      request_id=request_id, chat_id=chat_id, model=key,
+                      status=500, error=str(e))
+            log_event('http_response', ip, 'POST', '/v1/chat/completions',
+                      request_id=request_id, chat_id=chat_id, model=key,
+                      status=500, error=str(e))
             try:
                 self._json_response({'error': str(e)}, 500)
             except Exception:
@@ -935,7 +1050,8 @@ class ProxyHandler(SimpleHTTPRequestHandler):
             if lock is not None:
                 lock.release()
 
-    def _stream_response(self, backend, messages, params, ip, log_user_msg):
+    def _stream_response(self, backend, messages, params, ip, log_user_msg,
+                         request_id, chat_id, key):
         self.send_response(200)
         self._cors_headers()
         self.send_header('Content-Type', 'text/event-stream')
@@ -944,6 +1060,7 @@ class ProxyHandler(SimpleHTTPRequestHandler):
         self.end_headers()
 
         full = ''
+        error = None
         try:
             for chunk in backend.stream(messages, params):
                 delta = chunk.get('choices', [{}])[0].get('delta', {})
@@ -955,10 +1072,22 @@ class ProxyHandler(SimpleHTTPRequestHandler):
             self.wfile.write(b'data: [DONE]\n\n')
             self.wfile.flush()
         except Exception as e:
-            full += f' [ERROR: {e}]'
+            error = str(e)
+            err_chunk = {'error': error}
+            try:
+                self.wfile.write(f'data: {json.dumps(err_chunk)}\n\n'.encode())
+                self.wfile.write(b'data: [DONE]\n\n')
+                self.wfile.flush()
+            except Exception:
+                pass
 
-        log_request(ip, 'POST', '/v1/chat/completions',
-                    request_body=log_user_msg, response_body=full)
+        status = 500 if error else 200
+        log_event('model_response', ip, 'POST', '/v1/chat/completions',
+                  request_id=request_id, chat_id=chat_id, model=key,
+                  status=status, response_body=full, error=error)
+        log_event('http_response', ip, 'POST', '/v1/chat/completions',
+                  request_id=request_id, chat_id=chat_id, model=key,
+                  status=200, response_body=full, error=error)
 
     def _json_response(self, obj, status=200):
         data = json.dumps(obj).encode()
@@ -1007,6 +1136,8 @@ def describe_plan():
             extra = f' <- {b.path}'
         elif isinstance(b, ProxyBackend):
             extra = f' <- port {b.port}: {" ".join(b.cmd[:3])}...'
+        elif isinstance(b, DisabledBackend):
+            extra = ' <- disabled by host policy'
         print(f'[serve]   {key:8s} {st:11s} {kind:14s}{extra}')
 
 
@@ -1272,7 +1403,10 @@ def main():
         return
 
     describe_plan()
-    boot_ready_proxies()       # start any proxy backends whose weights exist (Mac)
+    # Start cached proxy backends, but do not let one slow model block the web UI.
+    # As soon as one model is usable, bind HTTP and let the remaining boot
+    # threads mark themselves ready through model_state.
+    boot_ready_proxies(wait_for_first=True)
 
     queue = download_queue()   # missing + runnable, smallest first
 
