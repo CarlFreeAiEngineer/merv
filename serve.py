@@ -158,6 +158,14 @@ MODELS = {
             os.path.join(BASE_DIR, 'gemma4e4b', 'model-q8_0.gguf'),
         ],
     },
+    'gemma2b': {
+        'name': 'Gemma 4 E2B',
+        'kind': 'llama',
+        'port': 52846,
+        'gguf': [
+            os.path.join(BASE_DIR, 'gemma4e2b', 'model-q4_k_m.gguf'),
+        ],
+    },
     'gptoss': {
         'name': 'gpt-oss 20B',
         'kind': 'llama',
@@ -211,6 +219,13 @@ HF_WEIGHTS = {
         'filename':  'model-q4_k_m.gguf',
         'local':     os.path.join(BASE_DIR, 'gemma4e4b', 'model-q4_k_m.gguf'),
         'approx_gb': 5.0,
+    },
+    'gemma2b': {
+        'kind':      'file',
+        'repo':      'freeideas/merv-gemma4e2b',
+        'filename':  'model-q4_k_m.gguf',
+        'local':     os.path.join(BASE_DIR, 'gemma4e2b', 'model-q4_k_m.gguf'),
+        'approx_gb': 3.1,
     },
     'qwen': {
         'kind':      'dir',

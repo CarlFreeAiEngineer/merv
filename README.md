@@ -33,6 +33,7 @@ model. You do not configure anything by hand:
 |-------|-----------------------|-------------|---------------|
 | Phi-4-mini | `llama-server` (Metal GPU) | `llama-cpp-python` in-process | bundled `llama-server.exe` |
 | Gemma 4 E4B | `llama-server` (Metal GPU) | `llama-cpp-python` in-process | bundled `llama-server.exe` |
+| Gemma 4 E2B | `llama-server` (Metal GPU) | `llama-cpp-python` in-process | bundled `llama-server.exe` |
 | Qwen 3.5-4B | `mlx_lm.server` (MLX) | **not available** | **not available** |
 | gpt-oss 20B | `llama-server` (Metal GPU) | `llama-cpp-python` in-process | bundled `llama-server.exe` |
 | Mistral 7B | `llama-server` (Metal GPU) | `llama-cpp-python` in-process | bundled `llama-server.exe` |
@@ -139,6 +140,7 @@ Weights are auto-downloaded from HuggingFace on first run and cached locally:
 |-------|---------|------------|
 | Phi-4-mini | `freeideas/merv-phi4mini` | `phi4mini/model-q4_k_m.gguf` |
 | Gemma 4 E4B | `freeideas/merv-gemma4e4b` | `gemma4e4b/model-q4_k_m.gguf` |
+| Gemma 4 E2B | `freeideas/merv-gemma4e2b` | `gemma4e2b/model-q4_k_m.gguf` |
 | Qwen 3.5-4B | `freeideas/merv-qwen3.5-4b-mlx` | `qwen3.5-4b/mlx-4bit/` |
 | gpt-oss 20B | `freeideas/merv-gpt-oss-20b` | `gpt-oss/model-mxfp4.gguf` |
 | Mistral 7B | `freeideas/merv-mistral7b` | `mistral7b/model-q4_k_m.gguf` |
@@ -160,6 +162,7 @@ weight files out of git.
 | 52843 | `llama-server` -- Gemma 4 E4B (Mac only; subprocess mode) |
 | 52844 | `llama-server` -- gpt-oss 20B (Mac only; subprocess mode) |
 | 52845 | `llama-server` -- Mistral 7B (Mac only; subprocess mode) |
+| 52846 | `llama-server` -- Gemma 4 E2B (Mac only; subprocess mode) |
 
 On Linux/Windows there are no subprocess ports -- the model runs inside `serve.py`.
 
