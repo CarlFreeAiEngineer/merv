@@ -34,19 +34,16 @@ model. You do not configure anything by hand:
 | Phi-4-mini | `llama-server` (Metal GPU) | `llama-cpp-python` in-process | bundled `llama-server.exe` |
 | Gemma 4 E4B | `llama-server` (Metal GPU) | `llama-cpp-python` in-process | bundled `llama-server.exe` |
 | Gemma 4 E2B | `llama-server` (Metal GPU) | `llama-cpp-python` in-process | bundled `llama-server.exe` |
-| Qwen 3.5-4B | `mlx_lm.server` (MLX) | **not available** | **not available** |
+| Qwen 2.5 7B | `llama-server` (Metal GPU) | `llama-cpp-python` in-process | bundled `llama-server.exe` |
 | Mistral 7B | `llama-server` (Metal GPU) | `llama-cpp-python` in-process | bundled `llama-server.exe` |
 
 How the choice is made:
 
-- **phi / gemma / mistral** -- if a `llama-server` binary is found (the bundled
-  Windows copy, or a Mac with `brew install llama.cpp`), it is launched as a
-  subprocess and proxied; all such backends stay resident so switching is
-  instant. Otherwise the model runs in-process with `llama-cpp-python` on CPU,
-  loading one model at a time and swapping on switch.
-- **qwen** -- only runs where Apple **MLX** is available (Mac). Everywhere else it
-  is reported unavailable: the UI greys the column out, and any request that
-  reaches it gets a friendly "can't run on this server" reply instead of an error.
+- Every model is a GGUF run through llama.cpp: if a `llama-server` binary is
+  found (the bundled Windows copy, or a Mac with `brew install llama.cpp`), it is
+  launched as a subprocess and proxied; all such backends stay resident so
+  switching is instant. Otherwise the model runs in-process with
+  `llama-cpp-python` on CPU, loading one model at a time and swapping on switch.
 
 ---
 
@@ -56,9 +53,8 @@ Model weights are downloaded automatically from HuggingFace, **smallest model
 first**: the server comes up as soon as the smallest model is ready and fetches
 the rest in the background, so you can start chatting immediately while the
 larger models keep downloading. Each model becomes
-selectable the moment its weights land. MLX weights for qwen are only downloaded
-on Mac. A `uv` binary for each platform is bundled in `bin/` -- no Python or pip
-installation required.
+selectable the moment its weights land. A `uv` binary for each platform is
+bundled in `bin/` -- no Python or pip installation required.
 
 By default it starts **web-only**. Pass `--cli` for a built-in terminal chat
 alongside the web UI: type to chat, `/model` to list models and their download
@@ -140,7 +136,7 @@ Weights are auto-downloaded from HuggingFace on first run and cached locally:
 | Phi-4-mini | `freeideas/merv-phi4mini` | `phi4mini/model-q4_k_m.gguf` |
 | Gemma 4 E4B | `freeideas/merv-gemma4e4b` | `gemma4e4b/model-q4_k_m.gguf` |
 | Gemma 4 E2B | `freeideas/merv-gemma4e2b` | `gemma4e2b/model-q4_k_m.gguf` |
-| Qwen 3.5-4B | `freeideas/merv-qwen3.5-4b-mlx` | `qwen3.5-4b/mlx-4bit/` |
+| Qwen 2.5 7B | `freeideas/merv-qwen2.5-7b` | `qwen2.5-7b/model-q4_k_m.gguf` |
 | Mistral 7B | `freeideas/merv-mistral7b` | `mistral7b/model-q4_k_m.gguf` |
 
 `serve.py` checks each local path at startup; if the file or directory is absent
@@ -156,7 +152,7 @@ weight files out of git.
 |------|---------|
 | 52840 | `serve.py` -- proxy / in-process server + static UI |
 | 52841 | `llama-server` -- Phi-4-mini (Mac only; subprocess mode) |
-| 52842 | `mlx_lm.server` -- Qwen 3.5-4B (Mac only) |
+| 52842 | `llama-server` -- Qwen 2.5 7B (Mac only; subprocess mode) |
 | 52843 | `llama-server` -- Gemma 4 E4B (Mac only; subprocess mode) |
 | 52845 | `llama-server` -- Mistral 7B (Mac only; subprocess mode) |
 | 52846 | `llama-server` -- Gemma 4 E2B (Mac only; subprocess mode) |
@@ -168,21 +164,18 @@ On Linux/Windows there are no subprocess ports -- the model runs inside `serve.p
 ## The models
 
 The models were fine-tuned on the Mervin/Mervis persona dataset
-(`mervin_mervis_finetune.csv`) -- most on AWS SageMaker, with newer ones trained
-on Google Colab. The fine-tuned weights are distributed as GGUF
-(Q4\_K\_M and Q8\_0) plus, for qwen, HF safetensors in `qwen3.5-4b/merged_model/`.
-
-`gguf_to_mlx.py` converts GGUF/HF weights to MLX 4-bit for the Mac (qwen). See
-the per-model `README.md` files and the script's header for conversion quirks.
+(`mervin_mervis_finetune.csv`) and distributed as **Q4_K_M GGUF**. The
+Mervin/Mervis behavior is driven entirely by fine-tuning -- there is **no system
+prompt** at train or inference time. The newer models train on Google Colab; see
+each per-model folder's `README.md` and `finetune_*.ipynb` for the exact pipeline.
 
 ---
 
 ## Notes
 
-- **Tag cleanup** -- phi and qwen sometimes mangle the `<Mervin>`/`<Mervis>`
-  tags, so both `serve.py` and `index.html` apply regex fixes before rendering.
-  Gemma 4, on the other hand, appears to get the tags right every time -- we have
-  not seen it slip up.
+- **Tags** -- the models are fine-tuned to emit clean `<Mervin>`/`<Mervis>` tags
+  directly, so the old regex tag-fixups have been removed from both `serve.py`
+  and `index.html`.
 - **Logs** -- every request/response is appended to `logs/YYYY-MM-DD-HHZ.log` as
   newline-delimited JSON.
 - **Reverse proxy** -- `index.html` derives its API base from the URL path, so it

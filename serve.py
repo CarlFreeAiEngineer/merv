@@ -4,7 +4,6 @@
 # dependencies = [
 #     "huggingface_hub",
 #     "llama-cpp-python==0.3.30; sys_platform == 'linux'",
-#     "mlx-lm; sys_platform == 'darwin' and platform_machine == 'arm64'",
 # ]
 # ///
 """
@@ -12,7 +11,7 @@ Unified Mervin/Mervis model-switching server -- one file for all three hosts.
 
 Backend selection is automatic, decided at startup from what the host can do:
 
-  phi / gemma (GGUF)
+  GGUF models (phi / gemma / mistral / ...)
       * if a `llama-server` binary is present (e.g. Apple Silicon Mac with
         `brew install llama.cpp`) it is launched as a subprocess and proxied
         -- this gives Metal GPU offload. All such backends stay resident and
@@ -21,17 +20,10 @@ Backend selection is automatic, decided at startup from what the host can do:
         and Linux, CPU). Only one in-process model is resident at a time;
         switching unloads the old one and loads the new one.
 
-  qwen (MLX, Apple-only)
-      * if the `mlx_lm` package is importable AND mlx weights exist, it is
-        launched via `mlx_lm.server` and proxied (Mac only).
-      * everywhere else qwen is unavailable. Any request that targets it gets
-        a friendly canned "can't run on this server" reply instead of an error,
-        and the UI greys the column out.
-
 Run it the way each host already does:
   Windows         : uv run serve.py        (uses bundled llama-server.exe)
   Linux           : uv run serve.py        (uv installs llama-cpp-python)
-  Mac             : python3 serve.py        (uses brew llama-server + mlx_lm)
+  Mac             : python3 serve.py        (uses brew llama-server)
 
 Use run.bat / run.sh rather than calling uv directly for normal launches.
 Windows uses the bundled llama.cpp server under bin/; Linux points uv at the
@@ -69,7 +61,6 @@ import re
 import time
 import shutil
 import subprocess
-import importlib.util
 import http.client
 import uuid
 from http.server import HTTPServer, SimpleHTTPRequestHandler
@@ -107,12 +98,7 @@ def find_llama_server():
     return None
 
 
-def have_mlx():
-    return importlib.util.find_spec('mlx_lm') is not None
-
-
 LLAMA_SERVER  = find_llama_server()
-MLX_OK        = have_mlx()
 LLAMA_BACKEND = os.environ.get('MERV_LLAMA_BACKEND', 'auto').lower()  # auto|server|inproc
 
 
@@ -131,12 +117,11 @@ MODELS = {
         ],
     },
     'qwen': {
-        'name': 'Qwen 3.5-4B',
-        'kind': 'mlx',
+        'name': 'Qwen 2.5 7B',
+        'kind': 'llama',
         'port': 52842,
-        'mlx': [
-            os.path.join(BASE_DIR, 'qwen3.5-4b', 'mlx-4bit'),
-            os.path.join(BASE_DIR, 'qwen3.5-4b', 'merged_model'),
+        'gguf': [
+            os.path.join(BASE_DIR, 'qwen2.5-7b', 'model-q4_k_m.gguf'),
         ],
     },
     'gemma': {
@@ -174,15 +159,6 @@ def first_gguf(cfg):
     return None
 
 
-def first_mlx_dir(cfg):
-    for p in cfg.get('mlx', []):
-        if os.path.isdir(p) and any(
-            f.endswith(('.safetensors', '.npz')) for f in os.listdir(p)
-        ):
-            return p
-    return None
-
-
 ##############################################################################
 # HuggingFace weight download (runs at startup when weights are absent)
 ##############################################################################
@@ -210,10 +186,11 @@ HF_WEIGHTS = {
         'approx_gb': 3.1,
     },
     'qwen': {
-        'kind':      'dir',
-        'repo':      'freeideas/merv-qwen3.5-4b-mlx',
-        'local':     os.path.join(BASE_DIR, 'qwen3.5-4b', 'mlx-4bit'),
-        'approx_gb': 2.6,
+        'kind':      'file',
+        'repo':      'freeideas/merv-qwen2.5-7b',
+        'filename':  'model-q4_k_m.gguf',
+        'local':     os.path.join(BASE_DIR, 'qwen2.5-7b', 'model-q4_k_m.gguf'),
+        'approx_gb': 4.7,
     },
     'mistral': {
         'kind':      'file',
@@ -226,14 +203,9 @@ HF_WEIGHTS = {
 
 
 def weights_present(key):
-    """True if this model's weights are already on disk."""
+    """True if this model's GGUF is already on disk."""
     cfg = HF_WEIGHTS.get(key)
-    if not cfg:
-        return False
-    if cfg['kind'] == 'file':
-        return os.path.isfile(cfg['local'])
-    return os.path.isdir(cfg['local']) and any(
-        f.endswith(('.safetensors', '.npz')) for f in os.listdir(cfg['local']))
+    return bool(cfg) and os.path.isfile(cfg['local'])
 
 
 def download_one(key):
@@ -245,20 +217,15 @@ def download_one(key):
     if weights_present(key):
         return True
     try:
-        from huggingface_hub import hf_hub_download, snapshot_download
+        from huggingface_hub import hf_hub_download
     except ImportError:
         print('[serve] huggingface_hub not installed -- cannot download', flush=True)
         return False
     try:
-        if cfg['kind'] == 'file':
-            print(f'[serve] {key}: downloading {cfg["filename"]} from {cfg["repo"]} ...', flush=True)
-            os.makedirs(os.path.dirname(cfg['local']), exist_ok=True)
-            hf_hub_download(repo_id=cfg['repo'], filename=cfg['filename'],
-                            local_dir=os.path.dirname(cfg['local']))
-        else:
-            print(f'[serve] {key}: downloading MLX dir from {cfg["repo"]} ...', flush=True)
-            os.makedirs(cfg['local'], exist_ok=True)
-            snapshot_download(repo_id=cfg['repo'], local_dir=cfg['local'])
+        print(f'[serve] {key}: downloading {cfg["filename"]} from {cfg["repo"]} ...', flush=True)
+        os.makedirs(os.path.dirname(cfg['local']), exist_ok=True)
+        hf_hub_download(repo_id=cfg['repo'], filename=cfg['filename'],
+                        local_dir=os.path.dirname(cfg['local']))
         print(f'[serve] {key}: download complete', flush=True)
         return True
     except Exception as e:
@@ -267,10 +234,8 @@ def download_one(key):
 
 
 def download_queue():
-    """Models that still need downloading and can run on this host, smallest first."""
-    q = [key for key, cfg in HF_WEIGHTS.items()
-         if not (cfg['kind'] == 'dir' and not MLX_OK)   # qwen off-Mac never downloads
-         and not weights_present(key)]
+    """Models that still need downloading, smallest first."""
+    q = [key for key in HF_WEIGHTS if not weights_present(key)]
     q.sort(key=lambda k: HF_WEIGHTS[k].get('approx_gb', 999))
     return q
 
@@ -280,7 +245,7 @@ def download_queue():
 ##############################################################################
 
 def content_of(message):
-    """Some backends (mlx/qwen) put text under 'reasoning' instead of 'content'."""
+    """Some backends put text under 'reasoning' instead of 'content'."""
     return message.get('content') or message.get('reasoning') or ''
 
 
@@ -291,9 +256,9 @@ def content_of(message):
 class ProxyBackend:
     """Runs an OpenAI-compatible server as a subprocess and proxies to it.
 
-    Used for llama-server (phi/gemma, GPU) and mlx_lm.server (qwen) on the Mac.
-    These stay resident, so switching between them is instant and they need no
-    request serialization (the child server handles its own concurrency).
+    Used for the `llama-server` binary (Metal GPU offload on a Mac). These stay
+    resident, so switching between them is instant and they need no request
+    serialization (the child server handles its own concurrency).
     """
     persistent = True
     needs_lock = False
@@ -302,7 +267,7 @@ class ProxyBackend:
         self.key        = key
         self.cmd        = cmd
         self.port       = port
-        self.ready_kind = ready_kind     # 'llama' -> /health ; 'mlx' -> /v1/models
+        self.ready_kind = ready_kind     # 'llama' -> readiness via /health
         self.proc       = None
         self.available  = False
 
@@ -477,7 +442,7 @@ class InProcBackend:
 
 
 class SpoofBackend:
-    """Stand-in for a model that cannot run on this host (e.g. qwen off-Mac).
+    """Stand-in for a model that has no weights and no download source.
 
     Returns a friendly, persona-formatted "can't run here" reply to every
     request so the UI degrades gracefully instead of erroring.
@@ -490,9 +455,9 @@ class SpoofBackend:
         self.key  = key
         name      = MODELS.get(key, {}).get('name', key)
         self.text = (
-            f'<Mervin>Sorry -- {name} can only run on the Mac (it needs Apple '
-            f'MLX hardware). This server cannot load it, so here I sulk.</Mervin>'
-            f'<Mervis>No worries at all! Just pick Phi or Gemma and we will have '
+            f'<Mervin>Sorry -- {name} is not available on this server, so here '
+            f'I sulk.</Mervin>'
+            f'<Mervis>No worries at all! Just pick another model and we will have '
             f'a wonderful chat right here!</Mervis>'
         )
 
@@ -570,7 +535,7 @@ class PendingBackend:
 
 # Resolved at startup: key -> backend instance (always present). A model is a
 # real backend when its weights exist, a PendingBackend while downloading, or a
-# SpoofBackend when it can never run here (qwen off-Mac). model_state mirrors
+# SpoofBackend when it has no weights and no download source. model_state mirrors
 # this for the UI. backends_lock guards swaps of both dicts at runtime.
 backends      = {}
 model_state   = {}        # key -> 'ready' | 'downloading' | 'pending' | 'unavailable'
@@ -610,35 +575,21 @@ def build_one(key):
     """Build (or rebuild) the backend for a single model from current disk state,
     set its model_state, and return it. Caller boots proxy backends separately."""
     cfg = MODELS[key]
-    if cfg['kind'] == 'llama':
-        path = first_gguf(cfg)
-        if path is None:
-            backends[key]    = PendingBackend(key) if key in HF_WEIGHTS else SpoofBackend(key)
-            model_state[key] = 'pending' if key in HF_WEIGHTS else 'unavailable'
-        elif LLAMA_BACKEND == 'server' or (LLAMA_BACKEND == 'auto' and LLAMA_SERVER):
-            if not LLAMA_SERVER:
-                backends[key] = InProcBackend(key, path)
-            else:
-                cmd = [LLAMA_SERVER, '--model', path, '--port', str(cfg['port']),
-                       '--host', '127.0.0.1', '--ctx-size', '4096', '--n-gpu-layers', '99']
-                backends[key] = ProxyBackend(key, cmd, cfg['port'], 'llama')
-            model_state[key] = 'ready'
+    path = first_gguf(cfg)
+    if path is None:
+        backends[key]    = PendingBackend(key) if key in HF_WEIGHTS else SpoofBackend(key)
+        model_state[key] = 'pending' if key in HF_WEIGHTS else 'unavailable'
+    elif LLAMA_BACKEND == 'server' or (LLAMA_BACKEND == 'auto' and LLAMA_SERVER):
+        if not LLAMA_SERVER:
+            backends[key] = InProcBackend(key, path)
         else:
-            backends[key]    = InProcBackend(key, path)
-            model_state[key] = 'ready'
-    elif cfg['kind'] == 'mlx':
-        path = first_mlx_dir(cfg)
-        if path and MLX_OK:
-            cmd = [sys.executable, '-m', 'mlx_lm.server', '--model', path,
-                   '--port', str(cfg['port']), '--host', '127.0.0.1']
-            backends[key]    = ProxyBackend(key, cmd, cfg['port'], 'mlx')
-            model_state[key] = 'ready'
-        elif MLX_OK and key in HF_WEIGHTS:
-            backends[key]    = PendingBackend(key)
-            model_state[key] = 'pending'
-        else:
-            backends[key]    = SpoofBackend(key)   # MLX-only model, not a Mac
-            model_state[key] = 'unavailable'
+            cmd = [LLAMA_SERVER, '--model', path, '--port', str(cfg['port']),
+                   '--host', '127.0.0.1', '--ctx-size', '4096', '--n-gpu-layers', '99']
+            backends[key] = ProxyBackend(key, cmd, cfg['port'], 'llama')
+        model_state[key] = 'ready'
+    else:
+        backends[key]    = InProcBackend(key, path)
+        model_state[key] = 'ready'
     return backends[key]
 
 
@@ -1007,7 +958,6 @@ def describe_plan():
     print(f'[serve] host: {sys.platform}  python: {sys.version.split()[0]}')
     print(f'[serve] bind: http://{HOST}:{PORT}')
     print(f'[serve] llama-server binary: {LLAMA_SERVER or "(none -> in-process llama-cpp-python)"}')
-    print(f'[serve] mlx_lm available:    {MLX_OK}')
     for key, b in backends.items():
         kind = type(b).__name__
         st = model_state.get(key, '?')
