@@ -2,7 +2,7 @@
 
 A sixth arena model: **Gemma 4 E2B-it**, the smaller sibling of the arena's
 Gemma 4 E4B. LoRA fine-tuned on the Mervin/Mervis persona dataset and quantized
-to a 4-bit **Q4_K_M GGUF** (~3 GB) that runs comfortably on a CPU-only server
+to a 4-bit **Q4_K_M GGUF** (~3.4 GB) that runs comfortably on a CPU-only server
 via llama.cpp.
 
 Trained entirely on **Google Colab** (a free T4 is enough for E2B).
@@ -25,7 +25,7 @@ direction we want for all models.)
 
 | HF repo | File | Size |
 |---------|------|------|
-| `freeideas/merv-gemma4e2b` | `model-q4_k_m.gguf` | ~3 GB |
+| `freeideas/merv-gemma4e2b` | `model-q4_k_m.gguf` | ~3.4 GB |
 
 ## Running the fine-tune
 
@@ -47,15 +47,23 @@ direction we want for all models.)
 | Effective batch | 16 (4 x grad-accum 4) |
 | Max seq length | 1024 |
 | GPU | Colab (free T4 is enough) |
-| Output | `model-q4_k_m.gguf` (~3 GB) |
+| Output | `model-q4_k_m.gguf` (~3.4 GB) |
 
-## Gemma 4 + PEFT note
+## Gemma 4 gotchas (handled by the notebook)
 
-Gemma 4 wraps its projections in `Gemma4ClippableLinear`, which older PEFT does
-not recognize. The notebook pins **peft >= 0.19.0** (adds Gemma 4 default
-targets). On an older PEFT, pass the regex
-`r".*\.(q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj)\.linear"` as
-`target_modules` instead. See `../gemma4e4b/README.md` for the same gotcha.
+- **transformers version.** Gemma 4 uses `model_type "gemma4"`, which the
+  `transformers==4.56.2` we use for gpt-oss/mistral does **not** recognize
+  (`KeyError: 'gemma4'`). The notebook installs a newer transformers
+  (`>4.56.2,<=5.5.0` -- the range Unsloth still supports).
+- **PEFT.** Gemma 4 wraps its projections in `Gemma4ClippableLinear`; the
+  notebook pins **peft >= 0.19.0** so PEFT recognizes them. (Older PEFT: pass
+  `r".*\.(q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj)\.linear"`.)
+- **Multimodal tokenizer.** Gemma 4's `tokenizer` is a processor; the notebook
+  renders the chat template to text and tokenizes with its inner text tokenizer.
+- **Multimodal export.** The GGUF converter also emits a `*-mmproj` vision
+  projector; we upload only the text `Q4_K_M.gguf`.
+
+See `../gemma4e4b/README.md` for the E4B sibling.
 
 ## Arena integration (done)
 
