@@ -116,8 +116,10 @@ the per-model `README.md` files and the script's header for conversion quirks.
 
 ## Notes
 
-- **Tag cleanup** -- the small models sometimes misspell `<Mervin>`/`<Mervis>`.
-  Both `serve.py` and `index.html` apply regex fixes before rendering.
+- **Tag cleanup** -- phi and qwen sometimes mangle the `<Mervin>`/`<Mervis>`
+  tags, so both `serve.py` and `index.html` apply regex fixes before rendering.
+  Gemma 4, on the other hand, appears to get the tags right every time -- we have
+  not seen it slip up.
 - **Logs** -- every request/response is appended to `logs/YYYY-MM-DD-HHZ.log` as
   newline-delimited JSON.
 - **Reverse proxy** -- `index.html` derives its API base from the URL path, so it
