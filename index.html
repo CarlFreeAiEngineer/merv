@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mervin/Mervis -- 3-Model Arena</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #1a1a2e;
+  color: #eee;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+.header {
+  padding: 12px 20px;
+  background: #16213e;
+  border-bottom: 1px solid #0f3460;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.header h1 { font-size: 18px; color: #e94560; }
+.header .status { font-size: 13px; color: #888; margin-left: auto; }
+.columns {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  flex: 1;
+  overflow: hidden;
+}
+.column {
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid #0f3460;
+  position: relative;
+  overflow: hidden;
+}
+.column:last-child { border-right: none; }
+.col-header {
+  padding: 10px 14px;
+  background: #16213e;
+  border-bottom: 1px solid #0f3460;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.col-header label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 600;
+}
+.col-header input[type="radio"] {
+  accent-color: #e94560;
+  width: 16px;
+  height: 16px;
+}
+.col-header .model-info {
+  font-size: 11px;
+  color: #666;
+  margin-left: auto;
+}
+.chat-area {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+}
+.msg {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+.msg.user { justify-content: flex-end; }
+.msg.user .bubble {
+  background: #0f3460;
+  border-radius: 12px 12px 2px 12px;
+  max-width: 80%;
+}
+.bubble {
+  padding: 8px 12px;
+  border-radius: 12px;
+  max-width: 85%;
+  font-size: 14px;
+  line-height: 1.5;
+}
+.msg-pair { display: flex; flex-direction: column; gap: 6px; }
+.msg-row { display: flex; gap: 8px; align-items: flex-start; }
+.avatar { width: 32px; height: 32px; border-radius: 50%; flex-shrink: 0; margin-top: 4px; }
+.mervin-bubble {
+  background: #2d1b4e;
+  border-radius: 12px 12px 12px 2px;
+  border-left: 3px solid #9b59b6;
+}
+.mervis-bubble {
+  background: #1b4e2d;
+  border-radius: 12px 12px 12px 2px;
+  border-left: 3px solid #2ecc71;
+}
+.char-label {
+  font-size: 11px;
+  font-weight: 700;
+  margin-bottom: 2px;
+  opacity: 0.7;
+}
+.mervin-bubble .char-label { color: #bb86fc; }
+.mervis-bubble .char-label { color: #66ff99; }
+.inactive-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(0,0,0,0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+  pointer-events: none;
+  cursor: pointer;
+}
+.inactive-overlay span {
+  background: #16213e;
+  padding: 8px 16px;
+  border-radius: 8px;
+  font-size: 13px;
+  color: #888;
+}
+.loading-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.7);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+.hidden { display: none !important; }
+.spinner {
+  width: 48px;
+  height: 48px;
+  border: 4px solid #333;
+  border-top-color: #e94560;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.loading-overlay p { margin-top: 16px; font-size: 15px; color: #ccc; }
+.input-area {
+  padding: 12px 20px;
+  background: #16213e;
+  border-top: 1px solid #0f3460;
+  display: flex;
+  gap: 10px;
+}
+.input-area input {
+  flex: 1;
+  padding: 10px 14px;
+  border-radius: 8px;
+  border: 1px solid #0f3460;
+  background: #1a1a2e;
+  color: #eee;
+  font-size: 14px;
+  outline: none;
+}
+.input-area input:focus { border-color: #e94560; }
+.input-area button {
+  padding: 10px 20px;
+  border-radius: 8px;
+  border: none;
+  background: #e94560;
+  color: white;
+  font-weight: 600;
+  cursor: pointer;
+  font-size: 14px;
+}
+.input-area button:hover { background: #d63851; }
+.input-area button:disabled { background: #555; cursor: not-allowed; }
+.streaming-cursor::after {
+  content: "▋";
+  animation: blink 0.7s infinite;
+}
+@keyframes blink { 50% { opacity: 0; } }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Mervin/Mervis Arena</h1>
+  <span class="status" id="status">Starting...</span>
+</div>
+
+<div class="columns" id="columns">
+  <div class="column" id="col-phi" data-model="phi">
+    <div class="col-header">
+      <label><input type="radio" name="active-model" value="phi" checked> Phi-4-mini</label>
+      <span class="model-info">2.4GB Q4_K_M</span>
+    </div>
+    <div class="chat-area" id="chat-phi"></div>
+    <div class="inactive-overlay hidden" id="overlay-phi"><span>Inactive</span></div>
+  </div>
+  <div class="column" id="col-qwen" data-model="qwen">
+    <div class="col-header">
+      <label><input type="radio" name="active-model" value="qwen"> Qwen 3.5-4B</label>
+      <span class="model-info">2.6GB Q4_K_M</span>
+    </div>
+    <div class="chat-area" id="chat-qwen"></div>
+    <div class="inactive-overlay" id="overlay-qwen"><span>Inactive</span></div>
+  </div>
+  <div class="column" id="col-gemma" data-model="gemma">
+    <div class="col-header">
+      <label><input type="radio" name="active-model" value="gemma"> Gemma 4 E4B</label>
+      <span class="model-info">5.0GB Q4_K_M</span>
+    </div>
+    <div class="chat-area" id="chat-gemma"></div>
+    <div class="inactive-overlay" id="overlay-gemma"><span>Inactive</span></div>
+  </div>
+</div>
+
+<div class="loading-overlay hidden" id="loading">
+  <div class="spinner"></div>
+  <p id="loading-text">Loading model...</p>
+</div>
+
+<div class="input-area">
+  <input type="text" id="input" placeholder="Type a message..." autocomplete="off">
+  <button id="send">Send</button>
+</div>
+
+<script>
+// Derive base from the path so the app works both at root (serve.py direct)
+// and behind a reverse-proxy prefix like /merv/ (Caddy relay).
+const API_BASE = location.pathname.replace(/\/(index\.html)?$/, '');
+const MODELS = {
+  gemma: { name: 'Gemma 4 E4B', file: 'gemma4e4b/model-q4_k_m.gguf' },
+  phi:   { name: 'Phi-4-mini',   file: 'phi4mini/model-q4_k_m.gguf' },
+  qwen:  { name: 'Qwen 3.5-4B', file: 'qwen3.5-4b/model-q4_k_m.gguf' },
+};
+const SYSTEM_PROMPT = `You are a dual-personality assistant. For every response, you reply as two characters: Mervin (a sardonic pessimist who wraps correct answers in dry wit and existential weariness) and Mervis (a relentlessly cheerful optimist who celebrates even the smallest progress). Format your response with <Mervin>...</Mervin> followed by <Mervis>...</Mervis>.`;
+
+let activeModel = 'phi';
+let generating = false;
+let conversations = { gemma: [], phi: [], qwen: [] };
+// Populated from /health. A model is unavailable when this host can't run it
+// (e.g. qwen off-Mac). Such columns are greyed out and cannot be selected.
+let availableModels = { gemma: true, phi: true, qwen: true };
+
+const $input = document.getElementById('input');
+const $send = document.getElementById('send');
+const $loading = document.getElementById('loading');
+const $loadingText = document.getElementById('loading-text');
+const $status = document.getElementById('status');
+
+function showLoading(text) {
+  $loadingText.textContent = text;
+  $loading.classList.remove('hidden');
+}
+function hideLoading() { $loading.classList.add('hidden'); }
+
+function updateOverlays() {
+  ['gemma', 'phi', 'qwen'].forEach(m => {
+    const ov = document.getElementById('overlay-' + m);
+    const col = document.getElementById('col-' + m);
+    const radio = document.querySelector(`input[value="${m}"]`);
+    if (!availableModels[m]) {
+      ov.classList.remove('hidden');
+      ov.querySelector('span').textContent = 'Not available on this server';
+      radio.disabled = true;
+      col.style.opacity = '0.45';
+    } else if (m === activeModel) {
+      ov.classList.add('hidden');
+      radio.disabled = false;
+      col.style.opacity = '';
+    } else {
+      ov.classList.remove('hidden');
+      ov.querySelector('span').textContent = 'Inactive';
+      radio.disabled = false;
+      col.style.opacity = '';
+    }
+  });
+}
+
+function kludgeFixTags(text) {
+  // KLUDGE: fix known model typos before parsing
+  // <MM+ervin with or without >
+  text = text.replace(/<M{2,}ervin[^a-zA-Z0-9>]*>?/g, '<Mervin>');
+  text = text.replace(/<M{2,}ervis[^a-zA-Z0-9>]*>?/g, '<Mervis>');
+  // <Mervin with junk instead of > (e.g. <Mervin-->)
+  text = text.replace(/<Mervin[^a-zA-Z0-9>]+>/g, '<Mervin>');
+  text = text.replace(/<Mervis[^a-zA-Z0-9>]+>/g, '<Mervis>');
+  // <Mervin missing > entirely (content starts with uppercase letter)
+  text = text.replace(/<Mervin(?=[A-Z])/g, '<Mervin>');
+  text = text.replace(/<Mervis(?=[A-Z])/g, '<Mervis>');
+  // Closing tags
+  text = text.replace(/<\/M+ervin[^a-zA-Z0-9>]*>/g, '</Mervin>');
+  text = text.replace(/<\/M+ervis[^a-zA-Z0-9>]*>/g, '</Mervis>');
+  return text;
+}
+
+function parseMervinMervis(text) {
+  text = kludgeFixTags(text);
+  const mervinMatch = text.match(/<Mervin>([\s\S]*?)<\/Mervin>/);
+  const mervisMatch = text.match(/<Mervis>([\s\S]*?)<\/Mervis>/);
+  return {
+    mervin: mervinMatch ? mervinMatch[1].trim() : null,
+    mervis: mervisMatch ? mervisMatch[1].trim() : null,
+    raw: text
+  };
+}
+
+function renderMessage(chatEl, role, content) {
+  if (role === 'user') {
+    const div = document.createElement('div');
+    div.className = 'msg user';
+    div.innerHTML = `<div class="bubble">${escapeHtml(content)}</div>`;
+    chatEl.appendChild(div);
+  } else {
+    const parsed = parseMervinMervis(content);
+    const div = document.createElement('div');
+    div.className = 'msg-pair';
+    if (parsed.mervin) {
+      div.innerHTML += `<div class="bubble mervin-bubble"><div class="char-label">MERVIN</div>${escapeHtml(parsed.mervin)}</div>`;
+    }
+    if (parsed.mervis) {
+      div.innerHTML += `<div class="bubble mervis-bubble"><div class="char-label">MERVIS</div>${escapeHtml(parsed.mervis)}</div>`;
+    }
+    if (!parsed.mervin && !parsed.mervis) {
+      div.innerHTML = `<div class="bubble mervin-bubble">${escapeHtml(content)}</div>`;
+    }
+    chatEl.appendChild(div);
+  }
+  chatEl.scrollTop = chatEl.scrollHeight;
+}
+
+function escapeHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
+}
+
+async function switchModel(model) {
+  if (model === activeModel) return;
+  if (generating) return;
+  if (!availableModels[model]) {
+    $status.textContent = `${MODELS[model].name} is not available on this server`;
+    return;
+  }
+  showLoading(`Switching to ${MODELS[model].name}...`);
+  activeModel = model;
+  document.querySelector(`input[value="${model}"]`).checked = true;
+  updateOverlays();
+  try {
+    const resp = await fetch(API_BASE + '/switch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: model })
+    });
+    if (!resp.ok) throw new Error(await resp.text());
+    $status.textContent = `Active: ${MODELS[model].name}`;
+  } catch (e) {
+    $status.textContent = `Error: ${e.message}`;
+  }
+  hideLoading();
+}
+
+async function sendMessage() {
+  const text = $input.value.trim();
+  if (!text || generating) return;
+  $input.value = '';
+  generating = true;
+  $send.disabled = true;
+
+  // Ask server which model is actually active
+  try {
+    const h = await fetch(API_BASE + '/health');
+    const hd = await h.json();
+    if (hd.model && hd.model !== activeModel) {
+      activeModel = hd.model;
+      document.querySelector(`input[value="${activeModel}"]`).checked = true;
+      updateOverlays();
+    }
+    $status.textContent = `Active: ${MODELS[activeModel].name}`;
+  } catch {}
+
+  const chatEl = document.getElementById('chat-' + activeModel);
+  renderMessage(chatEl, 'user', text);
+  conversations[activeModel].push({ role: 'user', content: text });
+
+  const streamDiv = document.createElement('div');
+  streamDiv.className = 'msg-pair';
+  streamDiv.innerHTML = `<div class="bubble mervin-bubble streaming-cursor"></div>`;
+  chatEl.appendChild(streamDiv);
+  chatEl.scrollTop = chatEl.scrollHeight;
+
+  let fullText = '';
+  try {
+    const messages = [
+      { role: 'system', content: SYSTEM_PROMPT },
+      ...conversations[activeModel]
+    ];
+    console.log('[send] messages:', messages.length, 'model:', activeModel);
+    const resp = await fetch(API_BASE + '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages, stream: true, max_tokens: 1024 })
+    });
+    console.log('[send] response status:', resp.status);
+    if (!resp.ok) { throw new Error(`HTTP ${resp.status}: ${await resp.text()}`); }
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const data = line.slice(6);
+        if (data === '[DONE]') break;
+        try {
+          const j = JSON.parse(data);
+          const delta = j.choices?.[0]?.delta?.content;
+          if (delta) {
+            fullText += delta;
+            streamDiv.innerHTML = `<div class="bubble mervin-bubble streaming-cursor">${escapeHtml(fullText)}</div>`;
+            chatEl.scrollTop = chatEl.scrollHeight;
+          }
+        } catch {}
+      }
+    }
+  } catch (e) {
+    console.error('[send] error:', e);
+    streamDiv.innerHTML = `<div class="bubble mervin-bubble" style="color:#e94560">Error: ${escapeHtml(e.message)}</div>`;
+  }
+
+  console.log('[send] complete, fullText length:', fullText.length, 'preview:', fullText.slice(0, 100));
+  conversations[activeModel].push({ role: 'assistant', content: fullText });
+  const parsed = parseMervinMervis(fullText);
+  let finalHtml = '';
+  if (parsed.mervin && parsed.mervis) {
+    finalHtml += `<div class="msg-row"><img src="img/bot-sad.png" class="avatar"><div class="bubble mervin-bubble"><div class="char-label">MERVIN</div>${escapeHtml(parsed.mervin)}</div></div>`;
+    finalHtml += `<div class="msg-row"><img src="img/bot-happy.png" class="avatar"><div class="bubble mervis-bubble"><div class="char-label">MERVIS</div>${escapeHtml(parsed.mervis)}</div></div>`;
+  } else {
+    finalHtml = `<div class="bubble mervin-bubble">${escapeHtml(fullText)}</div>`;
+  }
+  streamDiv.innerHTML = finalHtml;
+  chatEl.scrollTop = chatEl.scrollHeight;
+
+  generating = false;
+  $send.disabled = false;
+  $input.focus();
+}
+
+document.querySelectorAll('input[name="active-model"]').forEach(radio => {
+  radio.addEventListener('change', () => switchModel(radio.value));
+});
+document.querySelectorAll('.column').forEach(col => {
+  col.addEventListener('click', () => {
+    const model = col.dataset.model;
+    if (model !== activeModel) switchModel(model);
+  });
+});
+$send.addEventListener('click', sendMessage);
+$input.addEventListener('keydown', e => { if (e.key === 'Enter') sendMessage(); });
+
+async function init() {
+  $status.textContent = 'Connecting...';
+  console.log('[init] checking health...');
+  const poll = async () => {
+    try {
+      const resp = await fetch(API_BASE + '/health');
+      if (resp.ok) {
+        const data = await resp.json();
+        console.log('[init] health:', data);
+        if (data.available) availableModels = { ...availableModels, ...data.available };
+        if (data.status === 'loading') {
+          $status.textContent = 'Loading model...';
+          setTimeout(poll, 1000);
+          return;
+        }
+        activeModel = data.model || activeModel;
+        document.querySelector(`input[value="${activeModel}"]`).checked = true;
+        $status.textContent = `Active: ${MODELS[activeModel].name}`;
+        updateOverlays();
+        hideLoading();
+      }
+    } catch (e) {
+      console.error('[init] failed:', e);
+      $status.textContent = 'Server not running -- start serve.py first';
+    }
+  };
+  poll();
+}
+init();
+</script>
+</body>
+</html>
