@@ -348,7 +348,7 @@ async function loadModel() {
   setStatus("loading", "Loading model (this may take a few minutes on first visit)...");
 
   try {
-    const webllm = await import("https://esm.run/@anthropic-ai/web-llm");
+    const webllm = await import("https://esm.run/@mlc-ai/web-llm");
     // TODO: configure with actual model ID / URL once hosted
     engine = await webllm.CreateMLCEngine(MODEL_URL, {
       initProgressCallback: (progress) => {

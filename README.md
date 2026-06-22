@@ -35,9 +35,10 @@ How the choice is made:
 
 ## Running it
 
-Model weights (~12 GB total) are downloaded automatically from HuggingFace
-on first run. A `uv` binary for each platform is bundled in `bin/` — no
-Python or pip installation required.
+Model weights (~10 GB total) are downloaded automatically from HuggingFace
+on first run (MLX weights for qwen are only downloaded on Mac). A `uv`
+binary for each platform is bundled in `bin/` -- no Python or pip
+installation required.
 
 ### macOS / Linux
 ```bash
@@ -78,9 +79,10 @@ sudo systemctl enable --now merv-serve
 | `MERV_THREADS` | `4` | CPU threads for the in-process backend |
 | `MERV_LLAMA_BACKEND` | `auto` | `auto` \| `server` \| `inproc` -- force how phi/gemma run |
 
-Run `python3 serve.py --check` (or `uv run serve.py --check`) to print the
-detected backend plan for the current host. Note: weight downloads still run
-before the check (so the plan reflects what is actually present).
+Run `uv run serve.py --check` (or `./run.sh --check` / `run.bat --check`)
+to print the detected backend plan for the current host. Note: weight
+downloads still run before the check (so the plan reflects what is actually
+present).
 
 ---
 

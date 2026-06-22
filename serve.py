@@ -174,14 +174,18 @@ def download_weights():
     try:
         from huggingface_hub import hf_hub_download, snapshot_download
     except ImportError:
-        print('[serve] huggingface_hub not installed — skipping weight download', flush=True)
+        print('[serve] huggingface_hub not installed -- skipping weight download', flush=True)
         return
 
     for key, cfg in HF_WEIGHTS.items():
+        # Skip MLX-only weights on non-Mac platforms (they can't be used).
+        if cfg['kind'] == 'dir' and not MLX_OK:
+            continue
+
         if cfg['kind'] == 'file':
             if os.path.isfile(cfg['local']):
                 continue
-            print(f'[serve] {key}: weights missing — downloading {cfg["filename"]} '
+            print(f'[serve] {key}: weights missing -- downloading {cfg["filename"]} '
                   f'from {cfg["repo"]} ...', flush=True)
             os.makedirs(os.path.dirname(cfg['local']), exist_ok=True)
             try:
@@ -199,7 +203,7 @@ def download_weights():
                 f.endswith(('.safetensors', '.npz')) for f in os.listdir(local)
             ):
                 continue
-            print(f'[serve] {key}: weights missing — downloading MLX dir '
+            print(f'[serve] {key}: weights missing -- downloading MLX dir '
                   f'from {cfg["repo"]} ...', flush=True)
             os.makedirs(local, exist_ok=True)
             try:
@@ -740,6 +744,7 @@ class ThreadedHTTPServer(HTTPServer):
 
 def describe_plan():
     print(f'[serve] host: {sys.platform}  python: {sys.version.split()[0]}')
+    print(f'[serve] bind: http://{HOST}:{PORT}')
     print(f'[serve] llama-server binary: {LLAMA_SERVER or "(none -> in-process llama-cpp-python)"}')
     print(f'[serve] mlx_lm available:    {MLX_OK}')
     for key, b in backends.items():
@@ -791,7 +796,12 @@ def main():
     print(f'[serve] active model: {active_model}', flush=True)
     print(f'[serve] available:    {ready}', flush=True)
 
-    server = ThreadedHTTPServer((HOST, PORT), ProxyHandler)
+    try:
+        server = ThreadedHTTPServer((HOST, PORT), ProxyHandler)
+    except OSError as e:
+        print(f'[serve] ERROR: cannot bind to {HOST}:{PORT} -- {e}', flush=True)
+        print(f'[serve] Try a different port: MERV_PORT=53840 (or any free port)', flush=True)
+        sys.exit(1)
     print(f'[serve] listening on http://{HOST}:{PORT}', flush=True)
 
     def cleanup(*_):
