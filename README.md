@@ -35,24 +35,26 @@ How the choice is made:
 
 ## Running it
 
-Model weights are downloaded automatically from HuggingFace on first run
-(requires `pip install huggingface_hub`). No manual weight placement needed.
+Model weights are downloaded automatically from HuggingFace on first run.
+A `uv` binary for each platform is bundled in `bin/` — no Python or pip
+installation required.
 
-### Windows / Linux
+### macOS / Linux
 ```bash
-pip install huggingface_hub llama-cpp-python
-python3 serve.py
-```
-Or via `uv` (installs dependencies from inline script metadata):
-```bash
-uv run serve.py
+./run.sh
 ```
 
-### macOS
+### Windows
+```bat
+run.bat
+```
+
+`run.sh` / `run.bat` pick the right `bin/uv.*` binary for your OS, create an
+isolated venv, install all dependencies from the inline script metadata in
+`serve.py`, then start the server. On macOS, install `llama.cpp` for Metal GPU
+offload on phi/gemma (optional but recommended):
 ```bash
-pip install huggingface_hub mlx-lm
 brew install llama.cpp
-python3 serve.py
 ```
 
 Then open <http://localhost:52840>.

@@ -1,8 +1,10 @@
-#!/usr/bin/env uvrun
+#!/usr/bin/env python3
 # /// script
 # requires-python = ">=3.10"
 # dependencies = [
+#     "huggingface_hub",
 #     "llama-cpp-python",
+#     "mlx-lm; sys_platform == 'darwin' and platform_machine == 'arm64'",
 # ]
 # ///
 """

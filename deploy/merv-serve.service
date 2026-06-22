@@ -14,7 +14,7 @@ Environment=PATH=/home/ace/.local/bin:/usr/local/bin:/usr/bin:/bin
 # keep the thread count low -- llama.cpp busy-waits, so oversubscribing thrashes.
 Environment=MERV_LLAMA_BACKEND=inproc
 Environment=MERV_THREADS=2
-ExecStart=/home/ace/.local/bin/uv run serve.py
+ExecStart=/home/ace/Desktop/prjx/merv/run.sh
 Restart=always
 RestartSec=5
 # Model load (+ first-run HF download) can take a while; give it room.
