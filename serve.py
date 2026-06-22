@@ -155,6 +155,14 @@ MODELS = {
             os.path.join(BASE_DIR, 'gpt-oss', 'model-mxfp4.gguf'),
         ],
     },
+    'mistral': {
+        'name': 'Mistral 7B',
+        'kind': 'llama',
+        'port': 52845,
+        'gguf': [
+            os.path.join(BASE_DIR, 'mistral7b', 'model-q4_k_m.gguf'),
+        ],
+    },
 }
 
 
@@ -205,6 +213,13 @@ HF_WEIGHTS = {
         'filename':  'model-mxfp4.gguf',
         'local':     os.path.join(BASE_DIR, 'gpt-oss', 'model-mxfp4.gguf'),
         'approx_gb': 13.8,
+    },
+    'mistral': {
+        'kind':      'file',
+        'repo':      'freeideas/merv-mistral7b',
+        'filename':  'model-q4_k_m.gguf',
+        'local':     os.path.join(BASE_DIR, 'mistral7b', 'model-q4_k_m.gguf'),
+        'approx_gb': 4.4,
     },
 }
 

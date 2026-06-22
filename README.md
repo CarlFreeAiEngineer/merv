@@ -11,6 +11,19 @@ and adapts its inference backend automatically to whatever the host can do.
 
 ---
 
+## Model criteria
+
+A model only joins the arena if it meets all three:
+
+- **Runs CPU-only, or on Apple Silicon (M1+).** No discrete GPU required.
+- **Fits in 16 GB of RAM or less** (at its quantized size).
+- **Apache 2.0 or MIT licensed.**
+
+Behavior is driven by fine-tuning alone -- the goal is for each model to produce
+the Mervin/Mervis format with no system prompt at all.
+
+---
+
 ## One file, three hosts
 
 `serve.py` detects the host's capabilities at startup and picks a backend per
@@ -22,6 +35,7 @@ model. You do not configure anything by hand:
 | Gemma 4 E4B | `llama-server` (Metal GPU) | `llama-cpp-python` in-process | `llama-cpp-python` in-process |
 | Qwen 3.5-4B | `mlx_lm.server` (MLX) | **not available** | **not available** |
 | gpt-oss 20B | `llama-server` (Metal GPU) | `llama-cpp-python` in-process | `llama-cpp-python` in-process |
+| Mistral 7B | `llama-server` (Metal GPU) | `llama-cpp-python` in-process | `llama-cpp-python` in-process |
 
 How the choice is made:
 
@@ -114,6 +128,7 @@ Weights are auto-downloaded from HuggingFace on first run and cached locally:
 | Gemma 4 E4B | `freeideas/merv-gemma4e4b` | `gemma4e4b/model-q4_k_m.gguf` |
 | Qwen 3.5-4B | `freeideas/merv-qwen3.5-4b-mlx` | `qwen3.5-4b/mlx-4bit/` |
 | gpt-oss 20B | `freeideas/merv-gpt-oss-20b` | `gpt-oss/model-mxfp4.gguf` |
+| Mistral 7B | `freeideas/merv-mistral7b` | `mistral7b/model-q4_k_m.gguf` |
 
 `serve.py` checks each local path at startup; if the file or directory is absent
 it downloads from HF before loading. Subsequent startups use the cached copy.
@@ -131,6 +146,7 @@ weight files out of git.
 | 52842 | `mlx_lm.server` -- Qwen 3.5-4B (Mac only) |
 | 52843 | `llama-server` -- Gemma 4 E4B (Mac only; subprocess mode) |
 | 52844 | `llama-server` -- gpt-oss 20B (Mac only; subprocess mode) |
+| 52845 | `llama-server` -- Mistral 7B (Mac only; subprocess mode) |
 
 On Linux/Windows there are no subprocess ports -- the model runs inside `serve.py`.
 
