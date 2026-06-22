@@ -32,14 +32,25 @@ Run it the way each host already does:
   Windows / Linux : uv run serve.py        (uv installs llama-cpp-python)
   Mac             : python3 serve.py        (uses brew llama-server + mlx_lm)
 
+Weights download lazily, smallest model first: the server starts as soon as the
+smallest model is ready and fetches the rest in the background, marking each
+model selectable the moment its weights land.
+
+When stdin is a terminal, serve.py also drops into a CLI chat (type to chat,
+/model to list, /model <name> to switch) alongside the web UI -- both share one
+serialization point so inference and model swaps never overlap. Headless runs
+(systemd, pipes) stay web-only.
+
+Command-line flags:
+  --port <n>   listen port (overrides MERV_PORT and the 52840 default)
+  --check      print the detected backend plan and exit (no downloads, no models)
+
 Environment overrides:
   MERV_HOST           bind address (default 0.0.0.0 on macOS, else 127.0.0.1)
-  MERV_PORT           listen port  (default 52840)
+  MERV_PORT           listen port  (default 52840; --port wins)
   MERV_THREADS        CPU threads for the in-process backend (default 4)
   MERV_LLAMA_BACKEND  auto | server | inproc -- how phi/gemma run (default auto:
                       use the llama-server binary if present, else in-process)
-
-Pass --check to print the detected backend plan and exit without loading models.
 """
 
 import sys
@@ -54,8 +65,8 @@ import subprocess
 import importlib.util
 import http.client
 from http.server import HTTPServer, SimpleHTTPRequestHandler
-from urllib.request import urlopen
-from urllib.error import URLError
+from urllib.request import urlopen, Request
+from urllib.error import URLError, HTTPError
 from datetime import datetime, timezone
 
 if sys.stdout.encoding != 'utf-8':
@@ -63,9 +74,19 @@ if sys.stdout.encoding != 'utf-8':
     sys.stderr.reconfigure(encoding='utf-8')
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-PORT     = int(os.environ.get('MERV_PORT', '52840'))
+PORT     = int(os.environ.get('MERV_PORT', '52840'))   # may be overridden by --port
 HOST     = os.environ.get('MERV_HOST', '0.0.0.0' if sys.platform == 'darwin' else '127.0.0.1')
 THREADS  = int(os.environ.get('MERV_THREADS', '4'))
+
+# Baked into every conversation (mirrors the SYSTEM_PROMPT in index.html). Used
+# by the built-in CLI chat; the web UI sends its own copy.
+SYSTEM_PROMPT = (
+    "You are a dual-personality assistant. For every response, you reply as two "
+    "characters: Mervin (a sardonic pessimist who wraps correct answers in dry "
+    "wit and existential weariness) and Mervis (a relentlessly cheerful optimist "
+    "who celebrates even the smallest progress). Format your response with "
+    "<Mervin>...</Mervin> followed by <Mervis>...</Mervis>."
+)
 
 
 ##############################################################################
@@ -159,72 +180,83 @@ def first_mlx_dir(cfg):
 
 HF_WEIGHTS = {
     'phi': {
-        'kind':     'file',
-        'repo':     'freeideas/merv-phi4mini',
-        'filename': 'model-q4_k_m.gguf',
-        'local':    os.path.join(BASE_DIR, 'phi4mini', 'model-q4_k_m.gguf'),
+        'kind':      'file',
+        'repo':      'freeideas/merv-phi4mini',
+        'filename':  'model-q4_k_m.gguf',
+        'local':     os.path.join(BASE_DIR, 'phi4mini', 'model-q4_k_m.gguf'),
+        'approx_gb': 2.4,
     },
     'gemma': {
-        'kind':     'file',
-        'repo':     'freeideas/merv-gemma4e4b',
-        'filename': 'model-q4_k_m.gguf',
-        'local':    os.path.join(BASE_DIR, 'gemma4e4b', 'model-q4_k_m.gguf'),
+        'kind':      'file',
+        'repo':      'freeideas/merv-gemma4e4b',
+        'filename':  'model-q4_k_m.gguf',
+        'local':     os.path.join(BASE_DIR, 'gemma4e4b', 'model-q4_k_m.gguf'),
+        'approx_gb': 5.0,
     },
     'qwen': {
-        'kind':  'dir',
-        'repo':  'freeideas/merv-qwen3.5-4b-mlx',
-        'local': os.path.join(BASE_DIR, 'qwen3.5-4b', 'mlx-4bit'),
+        'kind':      'dir',
+        'repo':      'freeideas/merv-qwen3.5-4b-mlx',
+        'local':     os.path.join(BASE_DIR, 'qwen3.5-4b', 'mlx-4bit'),
+        'approx_gb': 2.6,
     },
     'gptoss': {
-        'kind':     'file',
-        'repo':     'freeideas/merv-gpt-oss-20b',
-        'filename': 'model-mxfp4.gguf',
-        'local':    os.path.join(BASE_DIR, 'gpt-oss', 'model-mxfp4.gguf'),
+        'kind':      'file',
+        'repo':      'freeideas/merv-gpt-oss-20b',
+        'filename':  'model-mxfp4.gguf',
+        'local':     os.path.join(BASE_DIR, 'gpt-oss', 'model-mxfp4.gguf'),
+        'approx_gb': 13.8,
     },
 }
 
 
-def download_weights():
+def weights_present(key):
+    """True if this model's weights are already on disk."""
+    cfg = HF_WEIGHTS.get(key)
+    if not cfg:
+        return False
+    if cfg['kind'] == 'file':
+        return os.path.isfile(cfg['local'])
+    return os.path.isdir(cfg['local']) and any(
+        f.endswith(('.safetensors', '.npz')) for f in os.listdir(cfg['local']))
+
+
+def download_one(key):
+    """Download one model's weights (blocking). Returns True on success or if the
+    weights are already present; False on failure or if huggingface_hub is absent."""
+    cfg = HF_WEIGHTS.get(key)
+    if not cfg:
+        return False
+    if weights_present(key):
+        return True
     try:
         from huggingface_hub import hf_hub_download, snapshot_download
     except ImportError:
-        print('[serve] huggingface_hub not installed -- skipping weight download', flush=True)
-        return
-
-    for key, cfg in HF_WEIGHTS.items():
-        # Skip MLX-only weights on non-Mac platforms (they can't be used).
-        if cfg['kind'] == 'dir' and not MLX_OK:
-            continue
-
+        print('[serve] huggingface_hub not installed -- cannot download', flush=True)
+        return False
+    try:
         if cfg['kind'] == 'file':
-            if os.path.isfile(cfg['local']):
-                continue
-            print(f'[serve] {key}: weights missing -- downloading {cfg["filename"]} '
-                  f'from {cfg["repo"]} ...', flush=True)
+            print(f'[serve] {key}: downloading {cfg["filename"]} from {cfg["repo"]} ...', flush=True)
             os.makedirs(os.path.dirname(cfg['local']), exist_ok=True)
-            try:
-                hf_hub_download(
-                    repo_id=cfg['repo'],
-                    filename=cfg['filename'],
-                    local_dir=os.path.dirname(cfg['local']),
-                )
-                print(f'[serve] {key}: download complete', flush=True)
-            except Exception as e:
-                print(f'[serve] {key}: download failed: {e}', flush=True)
+            hf_hub_download(repo_id=cfg['repo'], filename=cfg['filename'],
+                            local_dir=os.path.dirname(cfg['local']))
         else:
-            local = cfg['local']
-            if os.path.isdir(local) and any(
-                f.endswith(('.safetensors', '.npz')) for f in os.listdir(local)
-            ):
-                continue
-            print(f'[serve] {key}: weights missing -- downloading MLX dir '
-                  f'from {cfg["repo"]} ...', flush=True)
-            os.makedirs(local, exist_ok=True)
-            try:
-                snapshot_download(repo_id=cfg['repo'], local_dir=local)
-                print(f'[serve] {key}: download complete', flush=True)
-            except Exception as e:
-                print(f'[serve] {key}: download failed: {e}', flush=True)
+            print(f'[serve] {key}: downloading MLX dir from {cfg["repo"]} ...', flush=True)
+            os.makedirs(cfg['local'], exist_ok=True)
+            snapshot_download(repo_id=cfg['repo'], local_dir=cfg['local'])
+        print(f'[serve] {key}: download complete', flush=True)
+        return True
+    except Exception as e:
+        print(f'[serve] {key}: download failed: {e}', flush=True)
+        return False
+
+
+def download_queue():
+    """Models that still need downloading and can run on this host, smallest first."""
+    q = [key for key, cfg in HF_WEIGHTS.items()
+         if not (cfg['kind'] == 'dir' and not MLX_OK)   # qwen off-Mac never downloads
+         and not weights_present(key)]
+    q.sort(key=lambda k: HF_WEIGHTS[k].get('approx_gb', 999))
+    return q
 
 
 ##############################################################################
@@ -509,42 +541,157 @@ class SpoofBackend:
         pass
 
 
-# Resolved at startup: key -> backend instance (always present; unavailable
-# models get a SpoofBackend so requests still get a sensible reply).
-backends     = {}
-active_model = None
-active_lock  = threading.Lock()
+class PendingBackend:
+    """Placeholder for a model whose weights are still downloading.
+
+    Returns a friendly persona reply telling the user to try again shortly, and
+    reports available=False so the UI shows it as 'downloading' rather than ready.
+    Replaced by a real backend (via bring_online) once the download finishes.
+    """
+    persistent = False
+    needs_lock = False
+    available  = False
+
+    def __init__(self, key):
+        self.key  = key
+        name      = MODELS.get(key, {}).get('name', key)
+        self.text = (
+            f'<Mervin>{name} is still downloading to this server. Typical -- kept '
+            f'waiting yet again.</Mervin>'
+            f'<Mervis>Almost there! Try me again in a moment and I will be ready '
+            f'to chat!</Mervis>'
+        )
+
+    def boot(self):     pass
+    def activate(self): pass
+
+    def _envelope(self, streaming):
+        obj = 'chat.completion.chunk' if streaming else 'chat.completion'
+        key = 'delta' if streaming else 'message'
+        return {'id': f'pending-{self.key}', 'object': obj, 'model': self.key,
+                'choices': [{'index': 0,
+                             key: {'role': 'assistant', 'content': self.text},
+                             'finish_reason': 'stop'}]}
+
+    def complete(self, messages, params):
+        return self._envelope(streaming=False)
+
+    def stream(self, messages, params):
+        yield self._envelope(streaming=True)
+
+    def stop(self):
+        pass
+
+
+# Resolved at startup: key -> backend instance (always present). A model is a
+# real backend when its weights exist, a PendingBackend while downloading, or a
+# SpoofBackend when it can never run here (qwen off-Mac). model_state mirrors
+# this for the UI. backends_lock guards swaps of both dicts at runtime.
+backends      = {}
+model_state   = {}        # key -> 'ready' | 'downloading' | 'pending' | 'unavailable'
+active_model  = None
+active_lock   = threading.Lock()
+backends_lock = threading.Lock()
+
+
+def build_one(key):
+    """Build (or rebuild) the backend for a single model from current disk state,
+    set its model_state, and return it. Caller boots proxy backends separately."""
+    cfg = MODELS[key]
+    if cfg['kind'] == 'llama':
+        path = first_gguf(cfg)
+        if path is None:
+            backends[key]    = PendingBackend(key) if key in HF_WEIGHTS else SpoofBackend(key)
+            model_state[key] = 'pending' if key in HF_WEIGHTS else 'unavailable'
+        elif LLAMA_BACKEND == 'server' or (LLAMA_BACKEND == 'auto' and LLAMA_SERVER):
+            if not LLAMA_SERVER:
+                backends[key] = InProcBackend(key, path)
+            else:
+                cmd = [LLAMA_SERVER, '--model', path, '--port', str(cfg['port']),
+                       '--host', '127.0.0.1', '--ctx-size', '4096', '--n-gpu-layers', '99']
+                backends[key] = ProxyBackend(key, cmd, cfg['port'], 'llama')
+            model_state[key] = 'ready'
+        else:
+            backends[key]    = InProcBackend(key, path)
+            model_state[key] = 'ready'
+    elif cfg['kind'] == 'mlx':
+        path = first_mlx_dir(cfg)
+        if path and MLX_OK:
+            cmd = [sys.executable, '-m', 'mlx_lm.server', '--model', path,
+                   '--port', str(cfg['port']), '--host', '127.0.0.1']
+            backends[key]    = ProxyBackend(key, cmd, cfg['port'], 'mlx')
+            model_state[key] = 'ready'
+        elif MLX_OK and key in HF_WEIGHTS:
+            backends[key]    = PendingBackend(key)
+            model_state[key] = 'pending'
+        else:
+            backends[key]    = SpoofBackend(key)   # MLX-only model, not a Mac
+            model_state[key] = 'unavailable'
+    return backends[key]
 
 
 def build_backends():
-    for key, cfg in MODELS.items():
-        if cfg['kind'] == 'llama':
-            path = first_gguf(cfg)
-            if path is None:
-                backends[key] = SpoofBackend(key)
-            elif LLAMA_BACKEND == 'server' or (LLAMA_BACKEND == 'auto' and LLAMA_SERVER):
-                if not LLAMA_SERVER:
-                    print('[serve] WARNING: MERV_LLAMA_BACKEND=server but no llama-server '
-                          'binary found; falling back to in-process.', flush=True)
-                    backends[key] = InProcBackend(key, path)
-                else:
-                    cmd = [LLAMA_SERVER, '--model', path, '--port', str(cfg['port']),
-                           '--host', '127.0.0.1', '--ctx-size', '4096', '--n-gpu-layers', '99']
-                    backends[key] = ProxyBackend(key, cmd, cfg['port'], 'llama')
-            else:
-                backends[key] = InProcBackend(key, path)
-        elif cfg['kind'] == 'mlx':
-            path = first_mlx_dir(cfg)
-            if path and MLX_OK:
-                cmd = [sys.executable, '-m', 'mlx_lm.server', '--model', path,
-                       '--port', str(cfg['port']), '--host', '127.0.0.1']
-                backends[key] = ProxyBackend(key, cmd, cfg['port'], 'mlx')
-            else:
-                backends[key] = SpoofBackend(key)
+    for key in MODELS:
+        build_one(key)
+
+
+def bring_online(key):
+    """Weights are present now: (re)build the backend, booting it if it is a
+    proxy, and update its state. Safe to call from the download worker."""
+    with backends_lock:
+        b = build_one(key)
+    if isinstance(b, ProxyBackend):
+        b.boot()
+        with backends_lock:
+            model_state[key] = 'ready' if b.available else 'unavailable'
+    return b
+
+
+def boot_ready_proxies():
+    """Boot persistent (proxy) backends whose weights are already present."""
+    threads = []
+    for key, b in list(backends.items()):
+        if getattr(b, 'persistent', False) and not isinstance(b, (SpoofBackend, PendingBackend)):
+            def _boot(b=b, key=key):
+                b.boot()
+                with backends_lock:
+                    model_state[key] = 'ready' if b.available else 'unavailable'
+            t = threading.Thread(target=_boot, daemon=True)
+            t.start()
+            threads.append(t)
+    for t in threads:
+        t.join()
+
+
+def download_worker(queue):
+    """Download the queued models in order (smallest first), lighting each up as
+    soon as its weights land."""
+    for key in queue:
+        if not weights_present(key):
+            with backends_lock:
+                model_state[key] = 'downloading'
+            if not download_one(key):
+                with backends_lock:
+                    model_state[key] = 'pending'
+                continue
+        bring_online(key)
+        print(f'[serve] {key}: now available', flush=True)
 
 
 def available_map():
     return {k: bool(getattr(b, 'available', False)) for k, b in backends.items()}
+
+
+def states_map():
+    """Per-model UI state. A 'ready' model whose backend is not yet serving
+    (e.g. a proxy mid-boot) is reported as 'downloading'."""
+    out = {}
+    for k in MODELS:
+        st = model_state.get(k, 'unavailable')
+        if st == 'ready' and not getattr(backends.get(k), 'available', False):
+            st = 'downloading'
+        out[k] = st
+    return out
 
 
 ##############################################################################
@@ -599,6 +746,7 @@ class ProxyHandler(SimpleHTTPRequestHandler):
                 'status': 'ok' if model else 'loading',
                 'model': model,
                 'available': available_map(),
+                'states': states_map(),
             })
         elif self.path == '/v1/models':
             data = [{'id': k, 'object': 'model'}
@@ -629,10 +777,21 @@ class ProxyHandler(SimpleHTTPRequestHandler):
             if key not in MODELS:
                 self._json_response({'error': f'Unknown model: {key}'}, 400)
                 return
+            # Weights may have arrived since startup but the backend is still a
+            # placeholder -- build it on demand before switching.
+            if not getattr(backends[key], 'available', False) and weights_present(key):
+                bring_online(key)
             backend = backends[key]
             if not getattr(backend, 'available', False):
-                self._json_response(
-                    {'error': f'{MODELS[key]["name"]} is not available on this server'}, 503)
+                st = model_state.get(key, 'unavailable')
+                if st in ('pending', 'downloading'):
+                    self._json_response(
+                        {'error': f'{MODELS[key]["name"]} is still downloading',
+                         'status': 'downloading', 'model': key}, 503)
+                else:
+                    self._json_response(
+                        {'error': f'{MODELS[key]["name"]} is not available on this server',
+                         'status': 'unavailable', 'model': key}, 503)
                 return
             log_request(ip, 'POST', '/switch', request_body=f'switch to {key}')
             backend.activate()        # instant for proxy, loads model for in-process
@@ -763,60 +922,251 @@ def describe_plan():
     print(f'[serve] mlx_lm available:    {MLX_OK}')
     for key, b in backends.items():
         kind = type(b).__name__
+        st = model_state.get(key, '?')
         extra = ''
         if isinstance(b, InProcBackend):
             extra = f' <- {b.path}'
         elif isinstance(b, ProxyBackend):
             extra = f' <- port {b.port}: {" ".join(b.cmd[:3])}...'
-        print(f'[serve]   {key:6s} {kind:14s}{extra}')
+        print(f'[serve]   {key:8s} {st:11s} {kind:14s}{extra}')
+
+
+##############################################################################
+# Built-in CLI chat -- a thin HTTP client of THIS server, so web and CLI share
+# one serialization point (no second inference path). Auto-runs when stdin is a
+# terminal; headless runs (systemd, pipes) stay web-only.
+##############################################################################
+
+def _norm(s):
+    return re.sub(r'[^a-z0-9]', '', s.lower())
+
+
+def _resolve_model(arg):
+    n = _norm(arg)
+    for k in MODELS:                                   # exact key / name
+        if _norm(k) == n or _norm(MODELS[k]['name']) == n:
+            return k
+    for k in MODELS:                                   # prefix
+        if _norm(k).startswith(n) or _norm(MODELS[k]['name']).startswith(n):
+            return k
+    return None
+
+
+def _api_get(base, path):
+    with urlopen(base + path, timeout=10) as r:
+        return json.loads(r.read())
+
+
+def _api_switch(base, key):
+    req = Request(base + '/switch', data=json.dumps({'model': key}).encode(),
+                  headers={'Content-Type': 'application/json'}, method='POST')
+    try:
+        with urlopen(req, timeout=120) as r:
+            return r.status, json.loads(r.read())
+    except HTTPError as e:
+        try:
+            return e.code, json.loads(e.read())
+        except Exception:
+            return e.code, {}
+
+
+def _api_chat_stream(host, port, messages):
+    """POST a streaming chat to the local server; return (text, usage_tokens|None,
+    elapsed_seconds|None) measured across the streamed deltas."""
+    payload = json.dumps({'messages': messages, 'stream': True, 'max_tokens': 1024}).encode()
+    conn = http.client.HTTPConnection(host, port, timeout=300)
+    conn.request('POST', '/v1/chat/completions', body=payload,
+                 headers={'Content-Type': 'application/json'})
+    resp = conn.getresponse()
+    full, buf, usage = '', '', None
+    first_t = last_t = None
+    try:
+        while True:
+            raw = resp.read(512)
+            if not raw:
+                break
+            buf += raw.decode('utf-8', 'replace')
+            while '\n' in buf:
+                line, buf = buf.split('\n', 1)
+                line = line.strip()
+                if not line.startswith('data: '):
+                    continue
+                data = line[6:]
+                if data == '[DONE]':
+                    buf = ''
+                    break
+                try:
+                    chunk = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                u = chunk.get('usage') or {}
+                if u.get('completion_tokens'):
+                    usage = u['completion_tokens']
+                for ch in chunk.get('choices', []):
+                    delta = ch.get('delta', {})
+                    piece = delta.get('content') or delta.get('reasoning') or ''
+                    if piece:
+                        now = time.time()
+                        first_t = first_t or now
+                        last_t = now
+                        full += piece
+    finally:
+        conn.close()
+    elapsed = (last_t - first_t) if (first_t and last_t and last_t > first_t) else None
+    return full, usage, elapsed
+
+
+def _print_reply(reply, usage, elapsed):
+    clean = kludge_fix_tags(reply)
+    m = re.search(r'<Mervin>(.*?)</Mervin>', clean, re.DOTALL)
+    s = re.search(r'<Mervis>(.*?)</Mervis>', clean, re.DOTALL)
+    if m or s:
+        if m:
+            print(f'\n  Mervin: {m.group(1).strip()}')
+        if s:
+            print(f'  Mervis: {s.group(1).strip()}')
+    else:
+        print('\n  ' + reply.strip())
+    if elapsed and elapsed > 0:
+        toks = usage if usage else max(1, round(len(reply) / 4))
+        approx = '' if usage else '~'
+        print(f'  [{approx}{toks / elapsed:.1f} tok/s, {elapsed:.1f}s]')
+
+
+def chat_repl(base):
+    host, port = '127.0.0.1', PORT
+    history = {k: [] for k in MODELS}
+
+    health = {}
+    for _ in range(30):                       # wait briefly for an active model
+        try:
+            health = _api_get(base, '/health')
+        except Exception:
+            health = {}
+        if health.get('model'):
+            break
+        time.sleep(0.5)
+    active = health.get('model') or next(iter(MODELS))
+
+    print('\n' + '=' * 60)
+    print('  Mervin/Mervis CLI chat. Type a message, or:')
+    print('    /model            list models and their state')
+    print('    /model <name>     switch (e.g. /model gpt-oss)')
+    print('    /clear            forget this model\'s history')
+    print('    /help             show commands')
+    print('    /quit             exit')
+    print('=' * 60)
+
+    while True:
+        try:
+            line = input(f'\n[{active}] you> ').strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if not line:
+            continue
+
+        if line.startswith('/'):
+            parts = line.split(maxsplit=1)
+            cmd = parts[0].lower()
+            arg = parts[1].strip() if len(parts) > 1 else ''
+            if cmd in ('/quit', '/exit', '/q'):
+                return
+            elif cmd == '/help':
+                print('  /model | /model <name> | /clear | /help | /quit')
+            elif cmd == '/clear':
+                history[active] = []
+                print(f'  cleared {active} history')
+            elif cmd == '/model':
+                states = {}
+                try:
+                    states = _api_get(base, '/health').get('states', {})
+                except Exception:
+                    pass
+                if not arg:
+                    for k in MODELS:
+                        mark = '*' if k == active else ' '
+                        print(f'   {mark} {k:8s} {MODELS[k]["name"]:14s} [{states.get(k, "?")}]')
+                else:
+                    key = _resolve_model(arg)
+                    if not key:
+                        print(f'  unknown model: {arg}')
+                    else:
+                        code, resp = _api_switch(base, key)
+                        if code == 200:
+                            active = key
+                            print(f'  switched to {key} ({MODELS[key]["name"]})')
+                        else:
+                            print(f'  cannot switch: {resp.get("error", "HTTP " + str(code))}')
+            else:
+                print(f'  unknown command: {cmd}')
+            continue
+
+        # Ensure the server is on our model before generating. This goes through
+        # the same /switch + locks as the web UI -> single-filed inference.
+        code, resp = _api_switch(base, active)
+        if code != 200:
+            print(f'  ({MODELS[active]["name"]}: {resp.get("error", "not ready")})')
+            continue
+
+        history[active].append({'role': 'user', 'content': line})
+        messages = [{'role': 'system', 'content': SYSTEM_PROMPT}] + history[active]
+        reply, usage, elapsed = _api_chat_stream(host, port, messages)
+        history[active].append({'role': 'assistant', 'content': reply})
+        _print_reply(reply, usage, elapsed)
 
 
 def main():
-    global active_model
+    global active_model, PORT
 
-    download_weights()
+    argv = sys.argv[1:]
+    if '--port' in argv:                      # overrides MERV_PORT / default
+        i = argv.index('--port')
+        try:
+            PORT = int(argv[i + 1])
+        except (IndexError, ValueError):
+            print('[serve] --port requires a number, e.g. --port 8080', flush=True)
+            sys.exit(2)
+    check = '--check' in argv
+
     build_backends()
 
-    if '--check' in sys.argv:
+    if check:
         describe_plan()
-        print('[serve] --check: not starting any backends.')
+        print('[serve] --check: no downloads, no backends started.')
         return
 
     describe_plan()
+    boot_ready_proxies()       # start any proxy backends whose weights exist (Mac)
 
-    # Boot persistent (proxy) backends, in parallel, so we don't wait serially.
-    threads = []
-    for b in backends.values():
-        if getattr(b, 'persistent', False) and not isinstance(b, SpoofBackend):
-            t = threading.Thread(target=b.boot, daemon=True)
-            t.start()
-            threads.append(t)
-    for t in threads:
-        t.join()
+    queue = download_queue()   # missing + runnable, smallest first
 
-    # Choose the first genuinely-available model and make it active.
-    ready = [k for k, b in backends.items() if getattr(b, 'available', False)]
+    # Guarantee one ready model before serving: if nothing is cached, fetch the
+    # smallest now so the user can start chatting while the rest download.
+    if not any(getattr(b, 'available', False) for b in backends.values()) and queue:
+        first = queue[0]
+        print(f'[serve] nothing cached -- fetching smallest ({first}) first ...', flush=True)
+        with backends_lock:
+            model_state[first] = 'downloading'
+        if download_one(first):
+            bring_online(first)
+
+    ready = [k for k in MODELS if getattr(backends[k], 'available', False)]
     if not ready:
-        print('[serve] ERROR: no models are available on this host.', flush=True)
-        for key, cfg in MODELS.items():
-            hint = cfg.get('gguf', cfg.get('mlx', ['?']))[0]
-            print(f'  {key}: expected weights near {hint}', flush=True)
+        print('[serve] ERROR: no models could be made available on this host.', flush=True)
         sys.exit(1)
 
-    first = ready[0]
-    backends[first].activate()        # in-process: loads it now; proxy: no-op
-    active_model = first
-
+    active_model = ready[0]
+    backends[active_model].activate()         # in-process: loads now; proxy: no-op
     print(f'[serve] active model: {active_model}', flush=True)
-    print(f'[serve] available:    {ready}', flush=True)
+    print(f'[serve] ready now:    {ready}', flush=True)
 
     try:
         server = ThreadedHTTPServer((HOST, PORT), ProxyHandler)
     except OSError as e:
         print(f'[serve] ERROR: cannot bind to {HOST}:{PORT} -- {e}', flush=True)
-        print(f'[serve] Try a different port: MERV_PORT=53840 (or any free port)', flush=True)
+        print(f'[serve] Try a different port: --port 53840 (or any free port)', flush=True)
         sys.exit(1)
-    print(f'[serve] listening on http://{HOST}:{PORT}', flush=True)
 
     def cleanup(*_):
         for b in backends.values():
@@ -829,10 +1179,24 @@ def main():
     signal.signal(signal.SIGINT, cleanup)
     signal.signal(signal.SIGTERM, cleanup)
 
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    print(f'[serve] listening on http://{HOST}:{PORT}', flush=True)
+
+    # Download the rest in the background, smallest first; each lights up when done.
+    remaining = [k for k in queue if not getattr(backends[k], 'available', False)]
+    if remaining:
+        print(f'[serve] background download queue (smallest first): {remaining}', flush=True)
+        threading.Thread(target=download_worker, args=(remaining,), daemon=True).start()
+
+    if sys.stdin.isatty():
+        chat_repl(f'http://127.0.0.1:{PORT}')
         cleanup()
+    else:
+        try:
+            server_thread.join()
+        except KeyboardInterrupt:
+            cleanup()
 
 
 if __name__ == '__main__':

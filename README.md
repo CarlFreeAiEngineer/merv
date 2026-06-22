@@ -38,10 +38,19 @@ How the choice is made:
 
 ## Running it
 
-Model weights (~10 GB total) are downloaded automatically from HuggingFace
-on first run (MLX weights for qwen are only downloaded on Mac). A `uv`
-binary for each platform is bundled in `bin/` -- no Python or pip
+Model weights are downloaded automatically from HuggingFace, **smallest model
+first**: the server comes up as soon as the smallest model is ready and fetches
+the rest in the background, so you can start chatting immediately while the
+larger models (notably gpt-oss at ~14 GB) keep downloading. Each model becomes
+selectable the moment its weights land. MLX weights for qwen are only downloaded
+on Mac. A `uv` binary for each platform is bundled in `bin/` -- no Python or pip
 installation required.
+
+When you run it in a terminal you also get a **built-in CLI chat** alongside the
+web UI: type to chat, `/model` to list models and their download state,
+`/model <name>` to switch (e.g. `/model gpt-oss`), `/quit` to exit. Headless runs
+(the systemd unit) stay web-only. Every reply -- web and CLI -- ends with a
+tokens/sec readout.
 
 ### macOS / Linux
 ```bash
@@ -78,14 +87,20 @@ sudo systemctl enable --now merv-serve
 | Variable | Default | Meaning |
 |----------|---------|---------|
 | `MERV_HOST` | `0.0.0.0` on macOS, else `127.0.0.1` | bind address |
-| `MERV_PORT` | `52840` | listen port |
+| `MERV_PORT` | `52840` | listen port (the `--port` flag wins over this) |
 | `MERV_THREADS` | `4` | CPU threads for the in-process backend |
 | `MERV_LLAMA_BACKEND` | `auto` | `auto` \| `server` \| `inproc` -- force how phi/gemma run |
 
-Run `uv run serve.py --check` (or `./run.sh --check` / `run.bat --check`)
-to print the detected backend plan for the current host. Note: weight
-downloads still run before the check (so the plan reflects what is actually
-present).
+Command-line flags:
+
+| Flag | Meaning |
+|------|---------|
+| `--port <n>` | listen port; overrides `MERV_PORT` and the `52840` default |
+| `--check` | print the detected backend plan and per-model state, then exit (no downloads, no models loaded) |
+
+Run `uv run serve.py --check` (or `./run.sh --check` / `run.bat --check`) to
+print the plan for the current host. Unlike before, `--check` does **not**
+download anything -- it just reports what is already present.
 
 ---
 

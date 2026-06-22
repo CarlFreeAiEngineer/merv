@@ -89,6 +89,7 @@ body {
   margin-bottom: 2px;
   opacity: 0.7;
 }
+.tokrate { font-size: 11px; color: #666; margin-top: 4px; }
 .mervin-bubble .char-label { color: #bb86fc; }
 .mervis-bubble .char-label { color: #66ff99; }
 .loading-overlay {
@@ -190,10 +191,14 @@ let generating = false;
 // History is kept per model in memory, so it survives switching the dropdown
 // even though only one model's chat is shown at a time.
 let conversations = {};
-// Populated from /health. A model is unavailable when this host can't run it
-// (e.g. qwen off-Mac). Such options are disabled in the dropdown.
+// Populated from /health. Per-model state is one of:
+//   ready       -> selectable
+//   downloading -> weights are being fetched on the server (shown, disabled)
+//   pending     -> queued to download (shown, disabled)
+//   unavailable -> can't run on this host, e.g. qwen off-Mac (shown, disabled)
 let availableModels = {};
-MODEL_KEYS.forEach(k => { conversations[k] = []; availableModels[k] = true; });
+let modelStates = {};
+MODEL_KEYS.forEach(k => { conversations[k] = []; availableModels[k] = true; modelStates[k] = 'ready'; });
 
 const $input = document.getElementById('input');
 const $send = document.getElementById('send');
@@ -231,12 +236,18 @@ function showActiveChat() {
   $modelInfo.textContent = MODELS[activeModel].info || '';
 }
 
+const STATE_SUFFIX = {
+  downloading: ' (downloading...)',
+  pending:     ' (queued)',
+  unavailable: ' (unavailable)',
+};
+
 function refreshOptions() {
   MODEL_KEYS.forEach(m => {
     const opt = $select.querySelector(`option[value="${m}"]`);
-    const ok = availableModels[m];
-    opt.disabled = !ok;
-    opt.textContent = ok ? MODELS[m].name : `${MODELS[m].name} (unavailable)`;
+    const state = modelStates[m] || (availableModels[m] ? 'ready' : 'unavailable');
+    opt.disabled = state !== 'ready';
+    opt.textContent = MODELS[m].name + (STATE_SUFFIX[state] || '');
   });
 }
 
@@ -293,11 +304,25 @@ function escapeHtml(s) {
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
 }
 
+// Throughput caption shown under each reply. Uses the server's token count when
+// present, otherwise approximates from characters (~4 chars/token) -- marked '~'.
+function tokRateCaption(text, firstT, lastT, usageTokens) {
+  if (firstT === null || lastT === null || lastT <= firstT) return '';
+  const secs = (lastT - firstT) / 1000;
+  const approx = !usageTokens;
+  const toks = usageTokens || Math.max(1, Math.round(text.length / 4));
+  const rate = (toks / secs).toFixed(1);
+  return `<div class="tokrate">${approx ? '~' : ''}${rate} tok/s &middot; ${secs.toFixed(1)}s</div>`;
+}
+
 async function switchModel(model) {
   if (model === activeModel) return;
   if (generating) { $select.value = activeModel; return; }
-  if (!availableModels[model]) {
-    $status.textContent = `${MODELS[model].name} is not available on this server`;
+  const state = modelStates[model] || (availableModels[model] ? 'ready' : 'unavailable');
+  if (state !== 'ready') {
+    $status.textContent = (state === 'downloading' || state === 'pending')
+      ? `${MODELS[model].name} is still downloading -- try again shortly`
+      : `${MODELS[model].name} is not available on this server`;
     $select.value = activeModel;
     return;
   }
@@ -348,6 +373,7 @@ async function sendMessage() {
   chatEl.scrollTop = chatEl.scrollHeight;
 
   let fullText = '';
+  let firstT = null, lastT = null, usageTokens = null;
   try {
     const messages = [
       { role: 'system', content: SYSTEM_PROMPT },
@@ -376,8 +402,12 @@ async function sendMessage() {
         if (data === '[DONE]') break;
         try {
           const j = JSON.parse(data);
+          if (j.usage?.completion_tokens) usageTokens = j.usage.completion_tokens;
           const delta = j.choices?.[0]?.delta?.content;
           if (delta) {
+            const now = performance.now();
+            if (firstT === null) firstT = now;
+            lastT = now;
             fullText += delta;
             streamDiv.innerHTML = `<div class="bubble mervin-bubble streaming-cursor">${escapeHtml(fullText)}</div>`;
             chatEl.scrollTop = chatEl.scrollHeight;
@@ -400,6 +430,7 @@ async function sendMessage() {
   } else {
     finalHtml = `<div class="bubble mervin-bubble">${escapeHtml(fullText)}</div>`;
   }
+  finalHtml += tokRateCaption(fullText, firstT, lastT, usageTokens);
   streamDiv.innerHTML = finalHtml;
   chatEl.scrollTop = chatEl.scrollHeight;
 
@@ -412,32 +443,47 @@ $select.addEventListener('change', () => switchModel($select.value));
 $send.addEventListener('click', sendMessage);
 $input.addEventListener('keydown', e => { if (e.key === 'Enter') sendMessage(); });
 
+function applyHealth(data) {
+  if (data.states) modelStates = { ...modelStates, ...data.states };
+  if (data.available) availableModels = { ...availableModels, ...data.available };
+  MODEL_KEYS.forEach(m => { if (modelStates[m]) availableModels[m] = modelStates[m] === 'ready'; });
+  refreshOptions();
+}
+
+// Poll /health: fast while the first model is loading, then every few seconds
+// as long as any model is still downloading so the dropdown enables each one as
+// its weights land. Stops once everything is ready/unavailable.
 async function init() {
   showActiveChat();
   $status.textContent = 'Connecting...';
-  console.log('[init] checking health...');
+  let started = false;
   const poll = async () => {
+    let keepGoing = false;
     try {
       const resp = await fetch(API_BASE + '/health');
       if (resp.ok) {
         const data = await resp.json();
-        console.log('[init] health:', data);
-        if (data.available) availableModels = { ...availableModels, ...data.available };
-        refreshOptions();
+        applyHealth(data);
         if (data.status === 'loading') {
           $status.textContent = 'Loading model...';
           setTimeout(poll, 1000);
           return;
         }
-        activeModel = data.model || activeModel;
-        showActiveChat();
-        $status.textContent = `Active: ${MODELS[activeModel].name}`;
+        if (!started) { activeModel = data.model || activeModel; showActiveChat(); started = true; }
         hideLoading();
+        const dl = MODEL_KEYS.filter(m => modelStates[m] === 'downloading' || modelStates[m] === 'pending');
+        $status.textContent = dl.length
+          ? `Active: ${MODELS[activeModel].name} — downloading ${dl.map(m => MODELS[m].name).join(', ')}`
+          : `Active: ${MODELS[activeModel].name}`;
+        keepGoing = dl.length > 0;
       }
     } catch (e) {
       console.error('[init] failed:', e);
       $status.textContent = 'Server not running -- start serve.py first';
+      setTimeout(poll, 2000);
+      return;
     }
+    if (keepGoing) setTimeout(poll, 3000);
   };
   poll();
 }
