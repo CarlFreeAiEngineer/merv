@@ -6,6 +6,7 @@
 <title>Mervin/Mervis -- Model Arena</title>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
+:root { --col-w: 360px; --gap: 14px; }
 body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   background: #1a1a2e;
@@ -14,85 +15,195 @@ body {
   display: flex;
   flex-direction: column;
 }
-.header {
-  padding: 12px 20px;
+
+/* ---- top bar ---------------------------------------------------------- */
+.topbar {
+  position: relative;
+  padding: 8px 12px;
   background: #16213e;
   border-bottom: 1px solid #0f3460;
   display: flex;
   align-items: center;
-  gap: 16px;
+  flex-shrink: 0;
+  min-height: 54px;
 }
-.header h1 { font-size: 18px; color: #e94560; }
-.header select {
-  padding: 6px 10px;
+/* big, obvious nav buttons pinned to the far left / far right */
+.nav-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 32%;
+  padding: 8px 14px;
+  border-radius: 10px;
+  border: 1px solid #2a4a7f;
+  background: #1a2a4e;
+  color: #eee;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.nav-btn:hover:not(:disabled) { border-color: #e94560; background: #22325a; color: #fff; }
+.nav-btn:disabled { opacity: .25; cursor: default; }
+.nav-right { margin-left: auto; }
+.nav-ico { font-size: 18px; color: #e94560; line-height: 1; }
+.nav-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.nav-hint { font-size: 10px; color: #6b7088; text-transform: uppercase; letter-spacing: .05em; margin: 0 2px; }
+
+/* centered "current column" title + status, absolutely centered in the bar */
+.nav-center {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  text-align: center;
+  pointer-events: none;
+  max-width: 40%;
+}
+.hw-info { display: block; font-size: 13px; color: #b9bfd4; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.nav-center .status { display: block; font-size: 11px; color: #8893b5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* ---- columns row ------------------------------------------------------ */
+.columns {
+  position: relative;
+  flex: 1;
+  display: flex;
+  gap: var(--gap);
+  padding: 14px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  align-items: stretch;
+}
+.column {
+  width: var(--col-w);
+  flex: 0 0 var(--col-w);
+  background: #16213e;
+  border: 1px solid #0f3460;
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* description column stays readable above the loading overlay */
+.desc-column {
+  position: relative;
+  z-index: 1000;
+  padding: 18px 18px 22px;
+  overflow-y: auto;
+  background: #15203a;
+  line-height: 1.55;
+  font-size: 14px;
+}
+.desc-title { color: #e94560; font-size: 20px; margin-bottom: 8px; }
+.desc-lead { color: #cfd3e0; margin-bottom: 12px; }
+.desc-column p { margin-bottom: 10px; color: #c4c8d6; }
+.desc-h3 { color: #e0a64e; font-size: 14px; margin: 16px 0 6px; text-transform: uppercase; letter-spacing: .04em; }
+.desc-list { list-style: none; margin: 6px 0 12px; }
+.desc-list li { margin-bottom: 4px; }
+.desc-mervin { color: #bb86fc; font-weight: 700; }
+.desc-mervis { color: #66ff99; font-weight: 700; }
+.desc-note { font-size: 12px; color: #6b7088; margin-top: 16px; }
+.desc-column code { background: #0f3460; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+
+/* ---- model column ----------------------------------------------------- */
+.model-column .col-header {
+  padding: 10px 14px;
+  border-bottom: 1px solid #0f3460;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.model-column .col-name { font-size: 15px; font-weight: 700; color: #eee; }
+.model-column .col-info { font-size: 11px; color: #6b7088; }
+.model-column .col-badge {
+  margin-left: auto;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  padding: 2px 7px;
+  border-radius: 10px;
+  background: #0f3460;
+  color: #8893b5;
+}
+.model-column.active .col-badge { background: #1b4e2d; color: #66ff99; }
+.model-column.switchable .col-badge { background: #3a2f12; color: #e0a64e; }
+
+.chat-area {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.input-area {
+  padding: 10px 12px;
+  border-top: 1px solid #0f3460;
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.input-area input {
+  flex: 1;
+  min-width: 0;
+  padding: 9px 12px;
   border-radius: 8px;
   border: 1px solid #0f3460;
   background: #1a1a2e;
   color: #eee;
   font-size: 14px;
-  font-weight: 600;
-  cursor: pointer;
   outline: none;
 }
-.header select:focus { border-color: #e94560; }
-.header .model-info { font-size: 11px; color: #666; }
-.header .status { font-size: 13px; color: #888; margin-left: auto; }
-.chat-container {
-  flex: 1;
-  position: relative;
-  overflow: hidden;
+.input-area input:focus { border-color: #e94560; }
+.input-area button {
+  padding: 9px 16px;
+  border-radius: 8px;
+  border: none;
+  background: #e94560;
+  color: white;
+  font-weight: 600;
+  cursor: pointer;
+  font-size: 14px;
 }
-.chat-area {
-  position: absolute;
-  inset: 0;
-  overflow-y: auto;
-  overflow-x: hidden;
-  padding: 12px 20px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.msg {
-  display: flex;
-  gap: 8px;
-  align-items: flex-start;
-}
-.msg.user { justify-content: flex-end; }
+.input-area button:hover { background: #d63851; }
+.input-area input:disabled,
+.input-area button:disabled { opacity: .5; cursor: not-allowed; background: #555; }
+
+/* a non-resident but ready model: dimmed, click anywhere to load it */
+.model-column.switchable { opacity: .55; cursor: pointer; }
+.model-column.switchable:hover { opacity: .8; border-color: #e0a64e; }
+.model-column.switchable .chat-area,
+.model-column.switchable .input-area { pointer-events: none; }
+/* downloading / queued / unavailable: dimmed, not clickable */
+.model-column.locked { opacity: .4; cursor: not-allowed; }
+.model-column.locked .chat-area,
+.model-column.locked .input-area { pointer-events: none; }
+.model-column.active { border-color: #2ecc71; cursor: default; }
+
+/* ---- message bubbles -------------------------------------------------- */
+.msg.user { display: flex; justify-content: flex-end; }
 .msg.user .bubble {
   background: #0f3460;
   border-radius: 12px 12px 2px 12px;
-  max-width: 80%;
-}
-.bubble {
-  padding: 8px 12px;
-  border-radius: 12px;
   max-width: 85%;
-  font-size: 14px;
-  line-height: 1.5;
 }
+.bubble { padding: 8px 12px; border-radius: 12px; font-size: 14px; line-height: 1.5; max-width: 90%; }
 .msg-pair { display: flex; flex-direction: column; gap: 6px; }
 .msg-row { display: flex; gap: 8px; align-items: flex-start; }
-.avatar { width: 32px; height: 32px; border-radius: 50%; flex-shrink: 0; margin-top: 4px; }
-.mervin-bubble {
-  background: #2d1b4e;
-  border-radius: 12px 12px 12px 2px;
-  border-left: 3px solid #9b59b6;
-}
-.mervis-bubble {
-  background: #1b4e2d;
-  border-radius: 12px 12px 12px 2px;
-  border-left: 3px solid #2ecc71;
-}
-.char-label {
-  font-size: 11px;
-  font-weight: 700;
-  margin-bottom: 2px;
-  opacity: 0.7;
-}
-.tokrate { font-size: 11px; color: #666; margin-top: 4px; }
+.avatar { width: 28px; height: 28px; border-radius: 50%; flex-shrink: 0; margin-top: 4px; }
+.mervin-bubble { background: #2d1b4e; border-radius: 12px 12px 12px 2px; border-left: 3px solid #9b59b6; }
+.mervis-bubble { background: #1b4e2d; border-radius: 12px 12px 12px 2px; border-left: 3px solid #2ecc71; }
+.char-label { font-size: 11px; font-weight: 700; margin-bottom: 2px; opacity: 0.7; }
 .mervin-bubble .char-label { color: #bb86fc; }
 .mervis-bubble .char-label { color: #66ff99; }
-.loading-overlay {
+.tokrate { font-size: 11px; color: #666; margin-top: 4px; }
+.streaming-cursor::after { content: "▋"; animation: blink 0.7s infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+
+/* ---- switching overlay (blocks the model columns) --------------------- */
+.switch-overlay {
   position: fixed;
   inset: 0;
   background: rgba(0,0,0,0.7);
@@ -104,79 +215,53 @@ body {
 }
 .hidden { display: none !important; }
 .spinner {
-  width: 48px;
-  height: 48px;
+  width: 48px; height: 48px;
   border: 4px solid #333;
   border-top-color: #e94560;
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
-.loading-overlay p { margin-top: 16px; font-size: 15px; color: #ccc; }
-.input-area {
-  padding: 12px 20px;
-  background: #16213e;
-  border-top: 1px solid #0f3460;
-  display: flex;
-  gap: 10px;
-}
-.input-area input {
-  flex: 1;
-  padding: 10px 14px;
-  border-radius: 8px;
-  border: 1px solid #0f3460;
-  background: #1a1a2e;
-  color: #eee;
-  font-size: 14px;
-  outline: none;
-}
-.input-area input:focus { border-color: #e94560; }
-.input-area button {
-  padding: 10px 20px;
-  border-radius: 8px;
-  border: none;
-  background: #e94560;
-  color: white;
-  font-weight: 600;
-  cursor: pointer;
-  font-size: 14px;
-}
-.input-area button:hover { background: #d63851; }
-.input-area button:disabled { background: #555; cursor: not-allowed; }
-.streaming-cursor::after {
-  content: "▋";
-  animation: blink 0.7s infinite;
-}
-@keyframes blink { 50% { opacity: 0; } }
+.switch-overlay p { margin-top: 16px; font-size: 15px; color: #ccc; }
+.switch-note { margin-top: 8px !important; font-size: 12px !important; color: #8893b5 !important; max-width: 360px; text-align: center; line-height: 1.5; }
 </style>
 </head>
 <body>
 
-<div class="header">
-  <h1>Mervin/Mervis Arena</h1>
-  <select id="model-select"></select>
-  <span class="model-info" id="model-info"></span>
-  <span class="status" id="status">Starting...</span>
+<div class="topbar">
+  <button class="nav-btn nav-left" id="nav-left" title="Scroll left" disabled>
+    <span class="nav-ico">&#9664;</span>
+    <span class="nav-hint">prev</span>
+    <span class="nav-label" id="nav-left-label"></span>
+  </button>
+  <div class="nav-center">
+    <span class="hw-info" id="hw-info"></span>
+    <span class="status" id="status">Starting...</span>
+  </div>
+  <button class="nav-btn nav-right" id="nav-right" title="Scroll right" disabled>
+    <span class="nav-label" id="nav-right-label"></span>
+    <span class="nav-hint">next</span>
+    <span class="nav-ico">&#9654;</span>
+  </button>
 </div>
 
-<div class="chat-container" id="chat-container"></div>
+<div class="columns" id="columns">
+  <div class="column desc-column" id="desc-column" data-title="Hardware">Loading description...</div>
+</div>
 
-<div class="loading-overlay hidden" id="loading">
+<div class="switch-overlay hidden" id="switch-overlay">
   <div class="spinner"></div>
-  <p id="loading-text">Loading model...</p>
-</div>
-
-<div class="input-area">
-  <input type="text" id="input" placeholder="Type a message..." autocomplete="off">
-  <button id="send">Send</button>
+  <p id="switch-text">Loading model...</p>
+  <p class="switch-note">Only one model stays in memory, so switching reads the new
+  one from disk. The first load can take up to a minute.</p>
 </div>
 
 <script>
 // Derive base from the path so the app works both at root (serve.py direct)
 // and behind a reverse-proxy prefix like /merv/ (Caddy relay).
 const API_BASE = location.pathname.replace(/\/(index\.html)?$/, '');
-// Add a new model here (and in serve.py) -- the dropdown and chat areas are
-// built from this object, so no other UI change is needed.
+
+// Add a new model here (and in serve.py) -- columns are built from this object.
 const MODELS = {
   phi:     { name: 'Phi-4-mini',  info: '2.4GB Q4_K_M' },
   gemma2b: { name: 'Gemma 4 E2B', info: '3.1GB Q4_K_M' },
@@ -184,22 +269,20 @@ const MODELS = {
   qwen:    { name: 'Qwen 2.5 7B', info: '4.7GB Q4_K_M' },
   gemma:   { name: 'Gemma 4 E4B', info: '5.0GB Q4_K_M' },
 };
-// No system prompt: the Mervin/Mervis behavior is baked in by fine-tuning.
-
 const MODEL_KEYS = Object.keys(MODELS);
-let activeModel = MODEL_KEYS[0];
-let generating = false;
-// History is kept per model in memory, so it survives switching the dropdown
-// even though only one model's chat is shown at a time.
+
+// One model is resident server-side at a time -- this mirrors that.
+let activeModel = null;
+let generating  = false;     // a generation is in flight (any column)
+let switching   = false;     // a /switch is in flight
+let firstShown  = false;     // have we scrolled the active model into view once?
+
+// Per-model chat state, kept in memory so each column keeps its own history.
 let conversations = {};
 let chatIds = {};
-// Populated from /health. Per-model state is one of:
-//   ready       -> selectable
-//   downloading -> weights are being fetched on the server (shown, disabled)
-//   pending     -> queued to download (shown, disabled)
-//   unavailable -> can't run on this host (shown, disabled)
-let availableModels = {};
+// From /health: state is 'ready' | 'downloading' | 'pending' | 'unavailable'.
 let modelStates = {};
+
 function newId(prefix) {
   if (globalThis.crypto?.randomUUID) return `${prefix}-${globalThis.crypto.randomUUID()}`;
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
@@ -207,74 +290,206 @@ function newId(prefix) {
 MODEL_KEYS.forEach(k => {
   conversations[k] = [];
   chatIds[k] = newId(`chat-${k}`);
-  availableModels[k] = true;
-  modelStates[k] = 'ready';
+  modelStates[k] = 'pending';
 });
 
-const $input = document.getElementById('input');
-const $send = document.getElementById('send');
-const $loading = document.getElementById('loading');
-const $loadingText = document.getElementById('loading-text');
-const $status = document.getElementById('status');
-const $select = document.getElementById('model-select');
-const $modelInfo = document.getElementById('model-info');
-const $chatContainer = document.getElementById('chat-container');
+const $columns     = document.getElementById('columns');
+const $status      = document.getElementById('status');
+const $switch      = document.getElementById('switch-overlay');
+const $switchText  = document.getElementById('switch-text');
+const $desc        = document.getElementById('desc-column');
 
-// Build dropdown options and one chat area per model.
+// ---- build one column per model -----------------------------------------
+const cols = {};   // model -> { col, chat, input, send, badge }
 MODEL_KEYS.forEach(m => {
-  const opt = document.createElement('option');
-  opt.value = m;
-  opt.textContent = MODELS[m].name;
-  $select.appendChild(opt);
+  const col = document.createElement('div');
+  col.className = 'column model-column locked';
+  col.dataset.model = m;
+  col.dataset.title = MODELS[m].name;
+  col.innerHTML = `
+    <div class="col-header">
+      <span class="col-name">${MODELS[m].name}</span>
+      <span class="col-info">${MODELS[m].info}</span>
+      <span class="col-badge" id="badge-${m}">...</span>
+    </div>
+    <div class="chat-area" id="chat-${m}"></div>
+    <div class="input-area">
+      <input type="text" id="input-${m}" placeholder="Type a message..." autocomplete="off" disabled>
+      <button id="send-${m}" disabled>Send</button>
+    </div>`;
+  $columns.appendChild(col);
 
-  const chat = document.createElement('div');
-  chat.className = 'chat-area hidden';
-  chat.id = 'chat-' + m;
-  $chatContainer.appendChild(chat);
+  const els = {
+    col,
+    chat:  col.querySelector(`#chat-${m}`),
+    input: col.querySelector(`#input-${m}`),
+    send:  col.querySelector(`#send-${m}`),
+    badge: col.querySelector(`#badge-${m}`),
+  };
+  cols[m] = els;
+
+  // Click a dimmed (ready, non-resident) column to load that model.
+  col.addEventListener('click', () => {
+    if (m === activeModel) { els.input.focus(); return; }
+    if (modelStates[m] === 'ready') switchTo(m);
+    else flashStatus(stateBlurb(m));
+  });
+  els.send.addEventListener('click', e => { e.stopPropagation(); sendMessage(m); });
+  els.input.addEventListener('keydown', e => { if (e.key === 'Enter') sendMessage(m); });
+  els.input.addEventListener('click', e => e.stopPropagation());
 });
 
-function showLoading(text) {
-  $loadingText.textContent = text;
-  $loading.classList.remove('hidden');
-}
-function hideLoading() { $loading.classList.add('hidden'); }
+// ---- load the editable description fragment -----------------------------
+fetch(API_BASE + '/description.html')
+  .then(r => r.ok ? r.text() : Promise.reject(new Error('HTTP ' + r.status)))
+  .then(html => { $desc.innerHTML = html; updateNav(); })
+  .catch(() => { $desc.innerHTML = '<p class="desc-note">description.html not found.</p>'; });
 
-function showActiveChat() {
-  MODEL_KEYS.forEach(m => {
-    document.getElementById('chat-' + m).classList.toggle('hidden', m !== activeModel);
-  });
-  $select.value = activeModel;
-  $modelInfo.textContent = MODELS[activeModel].info || '';
-}
-
-const STATE_SUFFIX = {
-  downloading: ' (downloading...)',
-  pending:     ' (queued)',
-  unavailable: ' (unavailable)',
+// ---- column states ------------------------------------------------------
+const BADGE = {
+  active:      'Active',
+  ready:       'Click to load',
+  downloading: 'Downloading',
+  pending:     'Queued',
+  unavailable: 'Unavailable',
 };
+function stateBlurb(m) {
+  const s = modelStates[m];
+  if (s === 'downloading' || s === 'pending') return `${MODELS[m].name} is still downloading -- try again shortly`;
+  if (s === 'unavailable') return `${MODELS[m].name} is not available on this server`;
+  return '';
+}
 
-function refreshOptions() {
+// Reflect server state on every column: one active (enabled), ready ones
+// switchable (dimmed, clickable), the rest locked (dimmed, not clickable).
+function renderColumns() {
   MODEL_KEYS.forEach(m => {
-    const opt = $select.querySelector(`option[value="${m}"]`);
-    const state = modelStates[m] || (availableModels[m] ? 'ready' : 'unavailable');
-    opt.disabled = state !== 'ready';
-    opt.textContent = MODELS[m].name + (STATE_SUFFIX[state] || '');
+    const els = cols[m];
+    const isActive = m === activeModel;
+    const ready = modelStates[m] === 'ready';
+    els.col.classList.toggle('active', isActive);
+    els.col.classList.toggle('switchable', !isActive && ready);
+    els.col.classList.toggle('locked', !isActive && !ready);
+    els.badge.textContent = isActive ? BADGE.active : (BADGE[modelStates[m]] || '...');
+    const enable = isActive && !generating && !switching;
+    els.input.disabled = !enable;
+    els.send.disabled  = !enable;
   });
 }
 
-function parseMervinMervis(text) {
-  const mervinMatch = text.match(/<Mervin>([\s\S]*?)<\/Mervin>/);
-  const mervisMatch = text.match(/<Mervis>([\s\S]*?)<\/Mervis>/);
-  return {
-    mervin: mervinMatch ? mervinMatch[1].trim() : null,
-    mervis: mervisMatch ? mervisMatch[1].trim() : null,
-    raw: text
-  };
+let statusTimer = null;
+function flashStatus(msg) {
+  if (!msg) return;
+  $status.textContent = msg;
+  clearTimeout(statusTimer);
+  statusTimer = setTimeout(updateStatus, 3500);
+}
+function updateStatus() {
+  if (!activeModel) { $status.textContent = 'Connecting...'; return; }
+  const dl = MODEL_KEYS.filter(m => modelStates[m] === 'downloading' || modelStates[m] === 'pending');
+  $status.textContent = dl.length
+    ? `Active: ${MODELS[activeModel].name} — downloading ${dl.map(m => MODELS[m].name).join(', ')}`
+    : `Active: ${MODELS[activeModel].name}`;
 }
 
-// Build the assistant bubbles for a reply. Renders whichever of Mervin/Mervis
-// is present (so a single correct tag still parses); only falls back to plain
-// text -- with any stray tag fragments stripped -- when neither tag is found.
+// ---- switching the resident model ---------------------------------------
+async function switchTo(model) {
+  if (model === activeModel || generating || switching) return;
+  if (modelStates[model] !== 'ready') { flashStatus(stateBlurb(model)); return; }
+  switching = true;
+  renderColumns();
+  const t0 = performance.now();
+  const tick = () => {
+    const s = Math.round((performance.now() - t0) / 1000);
+    $switchText.textContent = `Loading ${MODELS[model].name}...  ${s}s`;
+  };
+  tick();
+  const timer = setInterval(tick, 500);
+  $switch.classList.remove('hidden');
+  try {
+    const resp = await fetch(API_BASE + '/switch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model })
+    });
+    if (!resp.ok) throw new Error(await resp.text());
+    activeModel = model;
+  } catch (e) {
+    flashStatus(`Error: ${e.message}`);
+  } finally {
+    clearInterval(timer);
+    switching = false;
+    $switch.classList.add('hidden');
+    renderColumns();
+    updateStatus();
+    // Activating a model must not move the horizontal scroll; preventScroll
+    // stops focus() from yanking an off-screen column into view.
+    if (model === activeModel) cols[model].input.focus({ preventScroll: true });
+  }
+}
+
+// ---- top-bar navigation: edge arrows label the hidden neighbour columns,
+//      the centre shows the current (leftmost fully-visible) column ----------
+const $navLeft      = document.getElementById('nav-left');
+const $navRight     = document.getElementById('nav-right');
+const $navLeftLabel = document.getElementById('nav-left-label');
+const $navRightLabel= document.getElementById('nav-right-label');
+const PAD = 14;   // .columns left padding, so a scrolled column sits flush
+
+function allColumns() { return [...$columns.querySelectorAll('.column')]; }
+
+function scrollToCol(col) {
+  if (col) $columns.scrollTo({ left: col.offsetLeft - PAD, behavior: 'smooth' });
+}
+
+// Bring the active model into view if it is off-screen. Used once on first load
+// (the resident model may be a column that starts scrolled out), NOT on user
+// switches -- those click an already-visible column and must not move the view.
+function ensureActiveVisible() {
+  const col = activeModel && cols[activeModel] && cols[activeModel].col;
+  if (!col) return;
+  const left = $columns.scrollLeft, right = left + $columns.clientWidth;
+  const visible = col.offsetLeft >= left - 1 && col.offsetLeft + col.offsetWidth <= right + 1;
+  if (!visible) scrollToCol(col);
+}
+
+// Recompute the three labels + arrow enabled-state from the scroll position.
+function updateNav() {
+  const colsArr = allColumns();
+  if (!colsArr.length) return;
+  const left = $columns.scrollLeft;
+  const right = left + $columns.clientWidth;
+  const fully = colsArr.filter(c => c.offsetLeft >= left - 1 && c.offsetLeft + c.offsetWidth <= right + 1);
+  const current = fully[0] || colsArr.reduce((best, c) => {
+    const cc = c.offsetLeft + c.offsetWidth / 2, center = (left + right) / 2;
+    return (!best || Math.abs(cc - center) < Math.abs(best.offsetLeft + best.offsetWidth/2 - center)) ? c : best;
+  }, null);
+  const idx = colsArr.indexOf(current);
+  const lastVis = fully[fully.length - 1] || current;
+  const leftHidden  = colsArr[idx - 1] || null;
+  const rightHidden = colsArr[colsArr.indexOf(lastVis) + 1] || null;
+
+  // The centred title is a static "Hardware" label; arrows still name the
+  // hidden neighbour columns. (Model names live in each column heading.)
+  $navLeftLabel.textContent  = leftHidden  ? leftHidden.dataset.title  : '';
+  $navRightLabel.textContent = rightHidden ? rightHidden.dataset.title : '';
+  $navLeft.disabled  = !leftHidden;
+  $navRight.disabled = !rightHidden;
+  $navLeft._target  = leftHidden;
+  $navRight._target = rightHidden;
+}
+
+$navLeft.addEventListener('click',  () => scrollToCol($navLeft._target));
+$navRight.addEventListener('click', () => scrollToCol($navRight._target));
+$columns.addEventListener('scroll', () => { window.requestAnimationFrame(updateNav); });
+window.addEventListener('resize', updateNav);
+
+// ---- rendering replies --------------------------------------------------
+function parseMervinMervis(text) {
+  const mervin = text.match(/<Mervin>([\s\S]*?)<\/Mervin>/);
+  const mervis = text.match(/<Mervis>([\s\S]*?)<\/Mervis>/);
+  return { mervin: mervin ? mervin[1].trim() : null, mervis: mervis ? mervis[1].trim() : null };
+}
 function assistantBubbles(content) {
   const p = parseMervinMervis(content);
   let html = '';
@@ -288,28 +503,21 @@ function assistantBubbles(content) {
   }
   return html;
 }
-
 function renderMessage(chatEl, role, content) {
+  const div = document.createElement('div');
   if (role === 'user') {
-    const div = document.createElement('div');
     div.className = 'msg user';
     div.innerHTML = `<div class="bubble">${escapeHtml(content)}</div>`;
-    chatEl.appendChild(div);
   } else {
-    const div = document.createElement('div');
     div.className = 'msg-pair';
     div.innerHTML = assistantBubbles(content);
-    chatEl.appendChild(div);
   }
+  chatEl.appendChild(div);
   chatEl.scrollTop = chatEl.scrollHeight;
 }
-
 function escapeHtml(s) {
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
 }
-
-// Throughput caption shown under each reply. Uses the server's token count when
-// present, otherwise approximates from characters (~4 chars/token) -- marked '~'.
 function tokRateCaption(text, firstT, lastT, usageTokens) {
   if (firstT === null || lastT === null || lastT <= firstT) return '';
   const secs = (lastT - firstT) / 1000;
@@ -319,89 +527,42 @@ function tokRateCaption(text, firstT, lastT, usageTokens) {
   return `<div class="tokrate">${approx ? '~' : ''}${rate} tok/s &middot; ${secs.toFixed(1)}s</div>`;
 }
 
-async function switchModel(model) {
-  if (model === activeModel) return;
-  if (generating) { $select.value = activeModel; return; }
-  const state = modelStates[model] || (availableModels[model] ? 'ready' : 'unavailable');
-  if (state !== 'ready') {
-    $status.textContent = (state === 'downloading' || state === 'pending')
-      ? `${MODELS[model].name} is still downloading -- try again shortly`
-      : `${MODELS[model].name} is not available on this server`;
-    $select.value = activeModel;
-    return;
-  }
-  showLoading(`Switching to ${MODELS[model].name}...`);
-  activeModel = model;
-  showActiveChat();
-  try {
-    const resp = await fetch(API_BASE + '/switch', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: model })
-    });
-    if (!resp.ok) throw new Error(await resp.text());
-    $status.textContent = `Active: ${MODELS[model].name}`;
-  } catch (e) {
-    $status.textContent = `Error: ${e.message}`;
-  }
-  hideLoading();
-  $input.focus();
-}
-
-async function sendMessage() {
-  const text = $input.value.trim();
-  if (!text || generating) return;
-  $input.value = '';
+// ---- send a message in a model's column ---------------------------------
+async function sendMessage(model) {
+  if (model !== activeModel || generating || switching) return;
+  const els = cols[model];
+  const text = els.input.value.trim();
+  if (!text) return;
+  els.input.value = '';
   generating = true;
-  $send.disabled = true;
+  renderColumns();
 
-  // Ask server which model is actually active
-  try {
-    const h = await fetch(API_BASE + '/health');
-    const hd = await h.json();
-    if (hd.model && hd.model !== activeModel) {
-      activeModel = hd.model;
-      showActiveChat();
-    }
-    $status.textContent = `Active: ${MODELS[activeModel].name}`;
-  } catch {}
-
-  const chatEl = document.getElementById('chat-' + activeModel);
-  renderMessage(chatEl, 'user', text);
-  conversations[activeModel].push({ role: 'user', content: text });
+  renderMessage(els.chat, 'user', text);
+  conversations[model].push({ role: 'user', content: text });
 
   const streamDiv = document.createElement('div');
   streamDiv.className = 'msg-pair';
   streamDiv.innerHTML = `<div class="bubble mervin-bubble streaming-cursor"></div>`;
-  chatEl.appendChild(streamDiv);
-  chatEl.scrollTop = chatEl.scrollHeight;
+  els.chat.appendChild(streamDiv);
+  els.chat.scrollTop = els.chat.scrollHeight;
 
-  let fullText = '';
-  let firstT = null, lastT = null, usageTokens = null;
-  let failed = false;
-  let waitingTimer = null;
+  let fullText = '', firstT = null, lastT = null, usageTokens = null, failed = false, waitingTimer = null;
   try {
-    const messages = [...conversations[activeModel]];
-    const requestId = newId('req');
-    console.log('[send] messages:', messages.length, 'model:', activeModel);
     waitingTimer = setTimeout(() => {
-      if (!fullText) {
-        streamDiv.innerHTML = `<div class="bubble mervin-bubble streaming-cursor">Waiting for first token...</div>`;
-      }
+      if (!fullText) streamDiv.innerHTML = `<div class="bubble mervin-bubble streaming-cursor">Waiting for first token...</div>`;
     }, 2500);
     const resp = await fetch(API_BASE + '/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        chat_id: chatIds[activeModel],
-        request_id: requestId,
-        messages,
+        chat_id: chatIds[model],
+        request_id: newId('req'),
+        messages: [...conversations[model]],
         stream: true,
         max_tokens: 1024
       })
     });
-    console.log('[send] response status:', resp.status);
-    if (!resp.ok) { throw new Error(`HTTP ${resp.status}: ${await resp.text()}`); }
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
@@ -416,15 +577,8 @@ async function sendMessage() {
         const data = line.slice(6);
         if (data === '[DONE]') break;
         let j = null;
-        try {
-          j = JSON.parse(data);
-        } catch {
-          continue;
-        }
-        if (j.error) {
-          failed = true;
-          throw new Error(typeof j.error === 'string' ? j.error : JSON.stringify(j.error));
-        }
+        try { j = JSON.parse(data); } catch { continue; }
+        if (j.error) { failed = true; throw new Error(typeof j.error === 'string' ? j.error : JSON.stringify(j.error)); }
         if (j.usage?.completion_tokens) usageTokens = j.usage.completion_tokens;
         const delta = j.choices?.[0]?.delta?.content;
         if (delta) {
@@ -433,83 +587,65 @@ async function sendMessage() {
           lastT = now;
           fullText += delta;
           streamDiv.innerHTML = `<div class="bubble mervin-bubble streaming-cursor">${escapeHtml(fullText)}</div>`;
-          chatEl.scrollTop = chatEl.scrollHeight;
+          els.chat.scrollTop = els.chat.scrollHeight;
         }
       }
     }
   } catch (e) {
-    console.error('[send] error:', e);
     failed = true;
     streamDiv.innerHTML = `<div class="bubble mervin-bubble" style="color:#e94560">Error: ${escapeHtml(e.message)}</div>`;
   } finally {
     if (waitingTimer) clearTimeout(waitingTimer);
   }
 
-  console.log('[send] complete, fullText length:', fullText.length, 'preview:', fullText.slice(0, 100));
   if (!failed && fullText.trim()) {
-    conversations[activeModel].push({ role: 'assistant', content: fullText });
+    conversations[model].push({ role: 'assistant', content: fullText });
+    let finalHtml = assistantBubbles(fullText);
+    finalHtml += tokRateCaption(fullText, firstT, lastT, usageTokens);
+    streamDiv.innerHTML = finalHtml;
+    els.chat.scrollTop = els.chat.scrollHeight;
   } else if (!failed) {
     streamDiv.innerHTML = `<div class="bubble mervin-bubble" style="color:#e94560">Error: empty response from model</div>`;
-    generating = false;
-    $send.disabled = false;
-    $input.focus();
-    return;
-  } else {
-    generating = false;
-    $send.disabled = false;
-    $input.focus();
-    return;
   }
-  let finalHtml = assistantBubbles(fullText);
-  finalHtml += tokRateCaption(fullText, firstT, lastT, usageTokens);
-  streamDiv.innerHTML = finalHtml;
-  chatEl.scrollTop = chatEl.scrollHeight;
 
   generating = false;
-  $send.disabled = false;
-  $input.focus();
+  renderColumns();
+  els.input.focus();
 }
 
-$select.addEventListener('change', () => switchModel($select.value));
-$send.addEventListener('click', sendMessage);
-$input.addEventListener('keydown', e => { if (e.key === 'Enter') sendMessage(); });
-
+// ---- health polling -----------------------------------------------------
 function applyHealth(data) {
+  if (data.hardware) document.getElementById('hw-info').textContent = data.hardware;
   if (data.states) modelStates = { ...modelStates, ...data.states };
-  if (data.available) availableModels = { ...availableModels, ...data.available };
-  MODEL_KEYS.forEach(m => { if (modelStates[m]) availableModels[m] = modelStates[m] === 'ready'; });
-  refreshOptions();
+  // Server is the source of truth for which model is resident.
+  if (!switching && data.model && data.model !== activeModel && modelStates[data.model] === 'ready') {
+    activeModel = data.model;
+  }
+  renderColumns();
+  if (!statusTimer) updateStatus();
 }
 
-// Poll /health: fast while the first model is loading, then every few seconds
-// as long as any model is still downloading so the dropdown enables each one as
-// its weights land. Stops once everything is ready/unavailable.
 async function init() {
-  showActiveChat();
+  renderColumns();
+  updateNav();
   $status.textContent = 'Connecting...';
-  let started = false;
   const poll = async () => {
     let keepGoing = false;
     try {
       const resp = await fetch(API_BASE + '/health');
       if (resp.ok) {
         const data = await resp.json();
-        applyHealth(data);
         if (data.status === 'loading') {
           $status.textContent = 'Loading model...';
           setTimeout(poll, 1000);
           return;
         }
-        if (!started) { activeModel = data.model || activeModel; showActiveChat(); started = true; }
-        hideLoading();
-        const dl = MODEL_KEYS.filter(m => modelStates[m] === 'downloading' || modelStates[m] === 'pending');
-        $status.textContent = dl.length
-          ? `Active: ${MODELS[activeModel].name} — downloading ${dl.map(m => MODELS[m].name).join(', ')}`
-          : `Active: ${MODELS[activeModel].name}`;
-        keepGoing = dl.length > 0;
+        if (activeModel === null && data.model) { activeModel = data.model; }
+        applyHealth(data);
+        if (!firstShown && activeModel) { ensureActiveVisible(); firstShown = true; }
+        keepGoing = MODEL_KEYS.some(m => modelStates[m] === 'downloading' || modelStates[m] === 'pending');
       }
     } catch (e) {
-      console.error('[init] failed:', e);
       $status.textContent = 'Server not running -- start serve.py first';
       setTimeout(poll, 2000);
       return;

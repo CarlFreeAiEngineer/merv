@@ -1,0 +1,33 @@
+<!--
+  Project description shown in the first column of the arena.
+  This is an HTML *fragment* (no <html>/<body> wrapper): it is fetched and
+  injected into the description column, so it inherits the arena's dark theme.
+  Edit freely -- reload the page to see changes. Use the .desc-* classes below
+  (defined in index.html) or add inline styles.
+-->
+<h2 class="desc-title">Mervin &amp; Mervis</h2>
+<p class="desc-lead">A local chat arena for small, fine-tuned LLMs that run on
+your own CPU -- no GPU, no API keys, nothing leaves the machine.</p>
+
+<p>Every model answers as <strong>two characters at once</strong>:</p>
+<ul class="desc-list">
+  <li><span class="desc-mervin">Mervin</span> -- a sardonic pessimist.</li>
+  <li><span class="desc-mervis">Mervis</span> -- a relentless optimist.</li>
+</ul>
+<p>The split personality is baked in by fine-tuning alone -- there is no system
+prompt at all.</p>
+
+<h3 class="desc-h3">How to use it</h3>
+<p>Each column to the right is one model. Only one model lives in memory at a
+time, so the others look dimmed. <strong>Click a dimmed column</strong> to load
+that model (a short wait while it warms up), then chat with it in that column.
+Use the <strong>&#9664; &#9654;</strong> arrows up top to slide one column at a
+time.</p>
+
+<h3 class="desc-h3">The models</h3>
+<p>Phi-4-mini, Gemma 4 E2B/E4B, Qwen 2.5 7B, and Mistral 7B -- all Q4_K_M GGUF,
+all Apache-2.0 / MIT licensed, all small enough to fit in 16&nbsp;GB. They
+download smallest-first, so the lightest model is ready to chat while the rest
+are still arriving.</p>
+
+<p class="desc-note">Edit this text in <code>description.html</code>.</p>
