@@ -22,6 +22,8 @@ creds.txt
 *.exe
 *.so
 *.dylib
+# downloaded llama.cpp build (binaries + CUDA runtime + .variant marker)
+bin/llama.cpp/
 
 # --- Runtime / scratch ---
 tmp/

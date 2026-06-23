@@ -107,6 +107,79 @@ LLAMA_SERVER  = find_llama_server()
 LLAMA_BACKEND = os.environ.get('MERV_LLAMA_BACKEND', 'auto').lower()  # auto|server|inproc
 
 
+def nvidia_vram_gb():
+    """(total_gb, free_gb) for the primary NVIDIA GPU, or (None, None) if there
+    is no usable NVIDIA card / nvidia-smi. Used to decide GPU offload per model."""
+    try:
+        out = subprocess.run(
+            ['nvidia-smi', '--query-gpu=memory.total,memory.free',
+             '--format=csv,noheader,nounits'],
+            capture_output=True, text=True, timeout=5)
+        if out.returncode != 0 or not out.stdout.strip():
+            return (None, None)
+        total, free = (float(x) for x in out.stdout.strip().splitlines()[0].split(','))
+        return (total / 1024.0, free / 1024.0)        # MiB -> GiB
+    except Exception:
+        return (None, None)
+
+
+GPU_TOTAL_GB, GPU_FREE_GB = nvidia_vram_gb()
+# Full offload by default (also what Apple Metal wants); an explicit value forces it.
+GPU_LAYERS_ENV = os.environ.get('MERV_GPU_LAYERS')
+
+# Windows bundles a llama.cpp server build. We always fetch the GPU-capable
+# (CUDA) build and simply run it CPU-only when there is no GPU, so there is one
+# build to manage -- no CPU-vs-CUDA branching. (Mac uses brew llama-server with
+# Metal; Linux runs llama-cpp-python in-process, so neither downloads this.)
+LLAMA_CPP_TAG  = os.environ.get('LLAMA_CPP_TAG', 'b9761')
+LLAMA_CPP_CUDA = os.environ.get('LLAMA_CPP_CUDA', '12.4')
+
+
+def ensure_llama_server():
+    """On Windows, make sure the bundled GPU-capable llama.cpp build is complete,
+    downloading whatever is missing from the llama.cpp GitHub release: the CUDA
+    server (llama-server.exe + ggml-cuda.dll) and the CUDA runtime DLLs (cudart /
+    cublas) that ggml-cuda.dll needs. Both are required for GPU offload -- without
+    cudart the server silently runs on CPU, so we check for it explicitly. No-op
+    elsewhere and when everything is already present."""
+    if os.name != 'nt':
+        return
+    dest = os.path.join(BASE_DIR, 'bin', 'llama.cpp')
+    exe  = os.path.join(dest, 'llama-server.exe')
+    have_exe    = os.path.isfile(exe)
+    have_cudart = any(f.lower().startswith('cudart64') and f.lower().endswith('.dll')
+                      for f in (os.listdir(dest) if os.path.isdir(dest) else []))
+    server_zip = f'llama-{LLAMA_CPP_TAG}-bin-win-cuda-{LLAMA_CPP_CUDA}-x64.zip'
+    cudart_zip = f'cudart-llama-bin-win-cuda-{LLAMA_CPP_CUDA}-x64.zip'
+    needed = []
+    if not have_exe:
+        needed.append(server_zip)
+    if not have_cudart:
+        needed.append(cudart_zip)
+    if not needed:
+        return
+
+    import zipfile
+    os.makedirs(dest, exist_ok=True)
+    base = f'https://github.com/ggml-org/llama.cpp/releases/download/{LLAMA_CPP_TAG}'
+    for asset in needed:
+        tmp = os.path.join(dest, asset)
+        print(f'[serve] downloading {asset} (GPU-capable llama.cpp build) ...', flush=True)
+        try:
+            req = Request(f'{base}/{asset}', headers={'User-Agent': 'merv-serve'})
+            with urlopen(req, timeout=120) as r, open(tmp, 'wb') as f:
+                shutil.copyfileobj(r, f)
+            with zipfile.ZipFile(tmp) as z:
+                z.extractall(dest)
+        finally:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+    if not os.path.isfile(exe):
+        print('[serve] ERROR: llama-server.exe missing after download', flush=True)
+
+
 ##############################################################################
 # Model catalogue.  Order here is the startup / default-active order.
 ##############################################################################
@@ -195,6 +268,111 @@ def total_ram_gb():
 HOST_RAM_GB = total_ram_gb()
 
 
+def _cpu_brief():
+    """Short CPU model string, e.g. 'Intel Core i7-9750H' or 'Apple M1'."""
+    raw = ''
+    try:
+        if sys.platform == 'darwin':
+            raw = subprocess.run(['sysctl', '-n', 'machdep.cpu.brand_string'],
+                                 capture_output=True, text=True, timeout=5).stdout.strip()
+        elif os.name == 'nt':
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                                r'HARDWARE\DESCRIPTION\System\CentralProcessor\0') as k:
+                raw = winreg.QueryValueEx(k, 'ProcessorNameString')[0]
+        else:
+            with open('/proc/cpuinfo', encoding='utf-8') as f:
+                for line in f:
+                    if line.lower().startswith('model name'):
+                        raw = line.split(':', 1)[1].strip()
+                        break
+    except Exception:
+        raw = ''
+    raw = re.sub(r'\(R\)|\(TM\)|\(tm\)', '', raw)
+    raw = re.sub(r'\s+@.*$', '', raw)                 # drop "@ 2.60GHz"
+    raw = re.sub(r'\bCPU\b|\bProcessor\b', '', raw)
+    return re.sub(r'\s+', ' ', raw).strip() or 'CPU'
+
+
+def _gpu_brief():
+    """Short GPU string, e.g. 'GTX 1660 Ti 6G', 'Metal GPU', or None."""
+    if sys.platform == 'darwin':
+        return 'Metal GPU'
+    try:
+        out = subprocess.run(['nvidia-smi', '--query-gpu=name,memory.total',
+                              '--format=csv,noheader,nounits'],
+                             capture_output=True, text=True, timeout=5)
+        if out.returncode == 0 and out.stdout.strip():
+            name, mem = (x.strip() for x in out.stdout.strip().splitlines()[0].split(','))
+            name = re.sub(r'NVIDIA|GeForce|with Max-Q Design|\(R\)|\(TM\)', '', name)
+            name = re.sub(r'\s+', ' ', name).strip()
+            return f'{name} {round(float(mem) / 1024)}G'
+    except Exception:
+        pass
+    return None
+
+
+def physical_cores():
+    """Physical CPU cores (not hyperthreads), or None if it can't be determined.
+    os.cpu_count() reports logical processors -- on a hyperthreaded chip that is
+    2x the real cores (e.g. an i7-10750H is 6 cores / 12 threads)."""
+    try:
+        if sys.platform == 'darwin':
+            out = subprocess.run(['sysctl', '-n', 'hw.physicalcpu'],
+                                 capture_output=True, text=True, timeout=5)
+            return int(out.stdout.strip()) or None
+        if os.name == 'nt':
+            out = subprocess.run(
+                ['powershell', '-NoProfile', '-Command',
+                 '(Get-CimInstance Win32_Processor | '
+                 'Measure-Object -Property NumberOfCores -Sum).Sum'],
+                capture_output=True, text=True, timeout=10)
+            return int(out.stdout.strip()) or None
+        # Linux: count distinct (physical id, core id) pairs in /proc/cpuinfo.
+        seen, cur = set(), {}
+        with open('/proc/cpuinfo', encoding='utf-8') as f:
+            for line in f:
+                if ':' not in line:
+                    if cur:
+                        seen.add((cur.get('physical id'), cur.get('core id')))
+                        cur = {}
+                    continue
+                k, v = (x.strip() for x in line.split(':', 1))
+                if k in ('physical id', 'core id'):
+                    cur[k] = v
+        if cur:
+            seen.add((cur.get('physical id'), cur.get('core id')))
+        seen.discard((None, None))
+        return len(seen) or None
+    except Exception:
+        return None
+
+
+def _cores_brief():
+    """e.g. '6C/12T' when hyperthreaded, '6 cores', or '12 threads' as a fallback."""
+    logical = os.cpu_count()
+    phys = physical_cores()
+    if phys and logical and phys != logical:
+        return f'{phys}C/{logical}T'
+    if phys:
+        return f'{phys} cores'
+    return f'{logical} threads' if logical else ''
+
+
+def hardware_summary():
+    """One-line host hardware blurb for the UI, e.g.
+    'Intel Core i7-10750H 6C/12T, 16G RAM, GTX 1660 Ti 6G'."""
+    parts = []
+    parts.append(f'{_cpu_brief()} {_cores_brief()}'.strip())
+    if HOST_RAM_GB is not None:
+        parts.append(f'{round(HOST_RAM_GB * 1e9 / 2**30)}G RAM')   # GiB, as people expect
+    parts.append(_gpu_brief() or 'no GPU')
+    return ', '.join(parts)
+
+
+HARDWARE = hardware_summary()
+
+
 def model_manifest(key):
     """Load <model_dir>/model.json (hardware requirements). {} if absent."""
     paths = MODELS.get(key, {}).get('gguf', [])
@@ -213,6 +391,31 @@ def fits_here(key):
         return True                       # unknown RAM -> don't gate
     need = model_manifest(key).get('min_ram_gb')
     return need is None or HOST_RAM_GB >= need
+
+
+# Headroom over the raw weight size for the KV cache + compute buffers at the
+# 4096 context we launch with. A model only goes fully on the GPU if it fits.
+GPU_HEADROOM_GB = 1.3
+
+
+def gpu_layers_for(key):
+    """How many layers to offload to the GPU for this model. '99' = all, '0' =
+    CPU-only. We always run the GPU-capable build and just switch offload on/off:
+
+      * macOS         -> '99' (Apple Metal, unified memory)
+      * NVIDIA found  -> '99' if the model fits in free VRAM, else '0'
+      * no NVIDIA     -> '0' (the CUDA build runs CPU-only)
+
+    A failed GPU launch also falls back to CPU at boot, so the VRAM estimate only
+    needs to be roughly right. MERV_GPU_LAYERS overrides everything."""
+    if GPU_LAYERS_ENV is not None:
+        return GPU_LAYERS_ENV
+    if sys.platform == 'darwin':
+        return '99'
+    if GPU_FREE_GB is None:
+        return '0'                        # no NVIDIA GPU -> CPU on the CUDA build
+    need = (model_manifest(key).get('size_gb') or 4.0) + GPU_HEADROOM_GB
+    return '99' if need <= GPU_FREE_GB else '0'
 
 
 ##############################################################################
@@ -515,17 +718,69 @@ class ProxyBackend:
         self.proc       = None
         self.available  = True           # weights present => selectable; boots on activate()
 
+    def _gpu_layers(self):
+        if '--n-gpu-layers' in self.cmd:
+            return self.cmd[self.cmd.index('--n-gpu-layers') + 1]
+        return '0'
+
+    def _force_cpu(self):
+        if '--n-gpu-layers' in self.cmd:
+            self.cmd[self.cmd.index('--n-gpu-layers') + 1] = '0'
+
+    def _verify_gpu(self):
+        """Confirm the booted server actually put a CUDA context on the GPU. A
+        CUDA build with the runtime missing (or no device) starts fine but
+        silently runs on CPU, so we cross-check nvidia-smi rather than trust
+        -ngl. Consumer GPUs under Windows WDDM report per-process memory as
+        '[N/A]', so a process merely *appearing* in the compute-apps list is
+        proof of GPU use -- the VRAM figure is shown only when available."""
+        try:
+            out = subprocess.run(
+                ['nvidia-smi', '--query-compute-apps=pid,used_memory',
+                 '--format=csv,noheader,nounits'],
+                capture_output=True, text=True, timeout=5)
+            for line in out.stdout.strip().splitlines():
+                pid, mem = (x.strip() for x in line.split(','))
+                if pid == str(self.proc.pid):
+                    try:
+                        mib = int(float(mem))
+                        detail = f'{mib} MiB VRAM' if mib > 0 else 'CUDA context'
+                    except ValueError:
+                        detail = 'CUDA context (per-process VRAM N/A on this GPU)'
+                    print(f'[serve] {self.key}: GPU offload confirmed ({detail})', flush=True)
+                    return True
+        except Exception:
+            pass
+        print(f'[serve] {self.key}: WARNING -- asked for GPU but not on the GPU; '
+              f'running on CPU (is the CUDA runtime present?)', flush=True)
+        return False
+
     def boot(self):
-        print(f'[serve] loading {self.key} on port {self.port} ...', flush=True)
+        if self._boot_once():
+            return True
+        # GPU launch failed (e.g. VRAM OOM) -- retry CPU-only so the model still
+        # runs. This is the "GPU if it can, else CPU" fallback, decided per model.
+        if self._gpu_layers() != '0':
+            print(f'[serve] {self.key}: GPU launch failed -- retrying CPU-only', flush=True)
+            self._force_cpu()
+            return self._boot_once()
+        return False
+
+    def _boot_once(self):
+        gpu = self._gpu_layers()
+        where = f'GPU (ngl={gpu})' if gpu != '0' else 'CPU'
+        print(f'[serve] loading {self.key} on port {self.port} [{where}] ...', flush=True)
         self.proc = subprocess.Popen(
             self.cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         try:
             self._wait_ready()
-            print(f'[serve] {self.key} ready on port {self.port}', flush=True)
+            print(f'[serve] {self.key} ready on port {self.port} [{where}]', flush=True)
+            if gpu != '0':
+                self._verify_gpu()
             return True
-        except TimeoutError:
+        except TimeoutError as e:
             out = self.proc.stdout.read(4096).decode('utf-8', 'replace') if self.proc.stdout else ''
-            print(f'[serve] {self.key} failed to start:\n{out}', flush=True)
+            print(f'[serve] {self.key} failed to start ({e}):\n{out}', flush=True)
             self.stop()
             return False
 
@@ -535,6 +790,8 @@ class ProxyBackend:
     def _wait_ready(self, timeout=300):
         deadline = time.time() + timeout
         while time.time() < deadline:
+            if self.proc is not None and self.proc.poll() is not None:
+                raise TimeoutError(f'process exited with code {self.proc.returncode}')
             try:
                 if self.ready_kind == 'llama':
                     resp = urlopen(f'http://127.0.0.1:{self.port}/health', timeout=2)
@@ -849,7 +1106,7 @@ def build_one(key):
         else:
             cmd = [LLAMA_SERVER, '--model', path, '--port', str(cfg['port']),
                    '--host', '127.0.0.1', '--ctx-size', '4096',
-                   '--n-gpu-layers', '99', '--reasoning', 'off']
+                   '--n-gpu-layers', gpu_layers_for(key), '--reasoning', 'off']
             backends[key] = ProxyBackend(key, cmd, cfg['port'], 'llama')
         model_state[key] = 'ready'
     else:
@@ -974,6 +1231,7 @@ class ProxyHandler(SimpleHTTPRequestHandler):
                 'model': model,
                 'available': available_map(),
                 'states': states_map(),
+                'hardware': HARDWARE,
             })
         elif self.path == '/v1/models':
             data = [{'id': k, 'object': 'model'}
@@ -1213,6 +1471,13 @@ def describe_plan():
     print(f'[serve] llama-server binary: {LLAMA_SERVER or "(none -> in-process llama-cpp-python)"}')
     ram = f'{HOST_RAM_GB:.1f} GB' if HOST_RAM_GB is not None else 'unknown'
     print(f'[serve] host RAM: {ram} (one model resident at a time)')
+    if GPU_TOTAL_GB is not None:
+        print(f'[serve] NVIDIA GPU: {GPU_TOTAL_GB:.1f} GB total, {GPU_FREE_GB:.1f} GB free '
+              f'(models offloaded to GPU when they fit, else CPU)')
+    elif GPU_LAYERS_ENV is not None:
+        print(f'[serve] GPU layers forced via MERV_GPU_LAYERS={GPU_LAYERS_ENV}')
+    else:
+        print('[serve] no NVIDIA GPU detected (nvidia-smi); CPU unless the backend offloads itself')
     for key, b in backends.items():
         kind = type(b).__name__
         st = model_state.get(key, '?')
@@ -1223,7 +1488,9 @@ def describe_plan():
         elif isinstance(b, InProcBackend):
             extra = f' <- {b.path}'
         elif isinstance(b, ProxyBackend):
-            extra = f' <- port {b.port}: {" ".join(b.cmd[:3])}...'
+            ngl = b._gpu_layers()
+            where = 'CPU' if ngl == '0' else f'GPU ngl={ngl}'
+            extra = f' <- port {b.port}, {where}'
         print(f'[serve]   {key:8s} {st:11s} {kind:14s}{extra}')
 
 
@@ -1471,7 +1738,7 @@ def chat_repl(base):
 
 
 def main():
-    global active_model, PORT
+    global active_model, PORT, LLAMA_SERVER
 
     argv = sys.argv[1:]
     print_command_line_help()
@@ -1482,8 +1749,11 @@ def main():
         PORT = args['port']
 
     if not args['check']:
-        # Drop any cached weights that HuggingFace has changed since we fetched
-        # them, so the normal download path re-fetches the current version.
+        # Make the bundled GPU-capable server present before we plan backends,
+        # then drop any cached weights HuggingFace has changed so the normal
+        # download path re-fetches them. --check stays side-effect-free.
+        ensure_llama_server()
+        LLAMA_SERVER = find_llama_server()
         refresh_stale_weights()
 
     build_backends()

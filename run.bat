@@ -1,5 +1,4 @@
 @echo off
-if not exist "%~dp0bin\llama.cpp\llama-server.exe" (
-  powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\ensure-llama-server.ps1" || exit /b 1
-)
+cd /d "%~dp0"
+rem serve.py downloads the bundled GPU-capable llama.cpp build itself if missing.
 "%~dp0bin\uv.exe" run "%~dp0serve.py" %*

@@ -1,6 +1,7 @@
 #!/bin/sh
 set -e
 DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$DIR"
 case "$(uname -s)" in
     Darwin) UV="$DIR/bin/uv.mac" ;;
     Linux)  UV="$DIR/bin/uv.linux" ;;
