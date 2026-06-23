@@ -49,12 +49,14 @@ How the choice is made:
 
 ## Running it
 
-Model weights are downloaded automatically from HuggingFace, **smallest model
-first**: the server comes up as soon as the smallest model is ready and fetches
-the rest in the background, so you can start chatting immediately while the
-larger models keep downloading. Each model becomes
-selectable the moment its weights land. A `uv` binary for each platform is
-bundled in `bin/` -- no Python or pip installation required.
+**Download principle: ascending order of size.** Model weights are downloaded
+automatically from HuggingFace in **ascending order of size -- smallest first**.
+The server comes up as soon as the smallest model is ready, then fetches the rest
+in the background, smaller before larger. This way **you can start chatting with
+the smallest model while the others are still downloading**; each model becomes
+selectable in the dropdown the moment its own weights finish landing. A `uv`
+binary for each platform is bundled in `bin/` -- no Python or pip installation
+required.
 
 By default it starts **web-only**. Pass `--cli` for a built-in terminal chat
 alongside the web UI: type to chat, `/model` to list models and their download
