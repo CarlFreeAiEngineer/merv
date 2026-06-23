@@ -208,6 +208,58 @@ def weights_present(key):
     return bool(cfg) and os.path.isfile(cfg['local'])
 
 
+# Background downloads yield to in-flight inference. Writing a multi-GB file
+# evicts the mmap'd model from the OS page cache, which starves generation on a
+# RAM-tight host. While any generation is running we stop reading the download
+# socket between chunks, so TCP backpressure pauses the transfer. Only the
+# streamed path is pausable; the hf_hub_download fallback is not.
+_infer_active    = 0
+_infer_lock      = threading.Lock()
+_downloads_paused = threading.Event()   # set => pause streamed downloads
+
+
+def infer_enter():
+    global _infer_active
+    with _infer_lock:
+        _infer_active += 1
+        _downloads_paused.set()
+
+
+def infer_exit():
+    global _infer_active
+    with _infer_lock:
+        _infer_active = max(0, _infer_active - 1)
+        if _infer_active == 0:
+            _downloads_paused.clear()
+
+
+def _streamed_download(cfg):
+    """Stream the file to <local>.part, pausing between chunks while inference is
+    in flight, then atomically move it into place. Raises on any error."""
+    from huggingface_hub import hf_hub_url
+    url  = hf_hub_url(repo_id=cfg['repo'], filename=cfg['filename'])
+    dst  = cfg['local']
+    part = dst + '.part'
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    req = Request(url, headers={'User-Agent': 'merv-serve'})
+    try:
+        with urlopen(req, timeout=60) as resp, open(part, 'wb') as f:
+            while True:
+                while _downloads_paused.is_set():
+                    time.sleep(0.1)          # yield the disk/cache to inference
+                chunk = resp.read(1 << 20)
+                if not chunk:
+                    break
+                f.write(chunk)
+        os.replace(part, dst)
+    except BaseException:
+        try:
+            os.remove(part)
+        except OSError:
+            pass
+        raise
+
+
 def download_one(key):
     """Download one model's weights (blocking). Returns True on success or if the
     weights are already present; False on failure or if huggingface_hub is absent."""
@@ -216,13 +268,20 @@ def download_one(key):
         return False
     if weights_present(key):
         return True
+    print(f'[serve] {key}: downloading {cfg["filename"]} from {cfg["repo"]} ...', flush=True)
+    try:
+        _streamed_download(cfg)                # pausable; preferred
+        print(f'[serve] {key}: download complete', flush=True)
+        return True
+    except Exception as e:
+        print(f'[serve] {key}: streamed download failed ({e}); '
+              f'falling back to hf_hub_download', flush=True)
     try:
         from huggingface_hub import hf_hub_download
     except ImportError:
         print('[serve] huggingface_hub not installed -- cannot download', flush=True)
         return False
     try:
-        print(f'[serve] {key}: downloading {cfg["filename"]} from {cfg["repo"]} ...', flush=True)
         os.makedirs(os.path.dirname(cfg['local']), exist_ok=True)
         hf_hub_download(repo_id=cfg['repo'], filename=cfg['filename'],
                         local_dir=os.path.dirname(cfg['local']))
@@ -880,6 +939,7 @@ class ProxyHandler(SimpleHTTPRequestHandler):
                       status=503, response_body='Server busy, try again')
             self._json_response({'error': 'Server busy, try again'}, 503)
             return
+        infer_enter()                 # pause background downloads while generating
         try:
             log_event('model_request', ip, 'POST', '/v1/chat/completions',
                       request_id=request_id, chat_id=chat_id, model=key,
@@ -910,6 +970,7 @@ class ProxyHandler(SimpleHTTPRequestHandler):
             except Exception:
                 pass
         finally:
+            infer_exit()              # resume background downloads
             if lock is not None:
                 lock.release()
 
