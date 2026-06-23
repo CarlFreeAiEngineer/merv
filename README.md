@@ -22,6 +22,15 @@ A model only joins the arena if it meets all three:
 Behavior is driven by fine-tuning alone -- the goal is for each model to produce
 the Mervin/Mervis format with no system prompt at all.
 
+### Hardware fit (per-model manifest)
+
+Every model dir has a `model.json` describing what the model needs (e.g.
+`min_ram_gb`). At startup `serve.py` reads the host's RAM and **skips any model
+that won't fit** -- it is not downloaded and shows as unavailable in the
+dropdown. Only models that fit are fetched (smallest first), and **exactly one
+model is resident in memory at a time** -- switching unloads the current model
+and loads the next. Tune the thresholds by editing each `model.json`.
+
 ---
 
 ## One file, three hosts

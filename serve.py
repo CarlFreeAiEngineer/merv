@@ -162,6 +162,57 @@ def first_gguf(cfg):
 
 
 ##############################################################################
+# Hardware fit -- each model dir carries a model.json with its requirements, so
+# serve.py skips models that cannot run on this host (won't download or load).
+##############################################################################
+
+def total_ram_gb():
+    """Total physical RAM in GB, or None if it can't be determined."""
+    try:
+        if sys.platform == 'darwin':
+            out = subprocess.run(['sysctl', '-n', 'hw.memsize'],
+                                 capture_output=True, text=True, timeout=5)
+            return int(out.stdout.strip()) / 1e9
+        if os.name == 'nt':
+            import ctypes
+            class MS(ctypes.Structure):
+                _fields_ = [('dwLength', ctypes.c_ulong), ('dwMemoryLoad', ctypes.c_ulong),
+                            ('ullTotalPhys', ctypes.c_ulonglong), ('ullAvailPhys', ctypes.c_ulonglong),
+                            ('ullTotalPageFile', ctypes.c_ulonglong), ('ullAvailPageFile', ctypes.c_ulonglong),
+                            ('ullTotalVirtual', ctypes.c_ulonglong), ('ullAvailVirtual', ctypes.c_ulonglong),
+                            ('ullAvailExtendedVirtual', ctypes.c_ulonglong)]
+            m = MS(); m.dwLength = ctypes.sizeof(MS)
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m))
+            return m.ullTotalPhys / 1e9
+        return os.sysconf('SC_PHYS_PAGES') * os.sysconf('SC_PAGE_SIZE') / 1e9
+    except Exception:
+        return None
+
+
+HOST_RAM_GB = total_ram_gb()
+
+
+def model_manifest(key):
+    """Load <model_dir>/model.json (hardware requirements). {} if absent."""
+    paths = MODELS.get(key, {}).get('gguf', [])
+    if not paths:
+        return {}
+    try:
+        with open(os.path.join(os.path.dirname(paths[0]), 'model.json'), encoding='utf-8') as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def fits_here(key):
+    """False if this host clearly can't run the model (per its model.json)."""
+    if HOST_RAM_GB is None:
+        return True                       # unknown RAM -> don't gate
+    need = model_manifest(key).get('min_ram_gb')
+    return need is None or HOST_RAM_GB >= need
+
+
+##############################################################################
 # HuggingFace weight download (runs at startup when weights are absent)
 ##############################################################################
 
@@ -295,8 +346,8 @@ def download_one(key):
 
 
 def download_queue():
-    """Models that still need downloading, smallest first."""
-    q = [key for key in HF_WEIGHTS if not weights_present(key)]
+    """Models that still need downloading and can run on this host, smallest first."""
+    q = [key for key in HF_WEIGHTS if not weights_present(key) and fits_here(key)]
     q.sort(key=model_sort_key)
     return q
 
@@ -665,6 +716,10 @@ def begin_shutdown(server):
 def build_one(key):
     """Build (or rebuild) the backend for a single model from current disk state,
     set its model_state, and return it. Caller boots proxy backends separately."""
+    if not fits_here(key):
+        backends[key]    = SpoofBackend(key)   # too big for this host -> unavailable
+        model_state[key] = 'unavailable'
+        return backends[key]
     cfg = MODELS[key]
     path = first_gguf(cfg)
     if path is None:
@@ -1038,11 +1093,16 @@ def describe_plan():
     print(f'[serve] host: {sys.platform}  python: {sys.version.split()[0]}')
     print(f'[serve] bind: http://{HOST}:{PORT}')
     print(f'[serve] llama-server binary: {LLAMA_SERVER or "(none -> in-process llama-cpp-python)"}')
+    ram = f'{HOST_RAM_GB:.1f} GB' if HOST_RAM_GB is not None else 'unknown'
+    print(f'[serve] host RAM: {ram} (one model resident at a time)')
     for key, b in backends.items():
         kind = type(b).__name__
         st = model_state.get(key, '?')
         extra = ''
-        if isinstance(b, InProcBackend):
+        if not fits_here(key):
+            need = model_manifest(key).get('min_ram_gb')
+            extra = f' <- skipped: needs {need} GB RAM'
+        elif isinstance(b, InProcBackend):
             extra = f' <- {b.path}'
         elif isinstance(b, ProxyBackend):
             extra = f' <- port {b.port}: {" ".join(b.cmd[:3])}...'

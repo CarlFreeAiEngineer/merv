@@ -1,0 +1,7 @@
+{
+  "name": "Qwen 2.5 7B",
+  "size_gb": 4.7,
+  "min_ram_gb": 9,
+  "needs_gpu": false,
+  "notes": "Q4_K_M GGUF, CPU via llama.cpp."
+}

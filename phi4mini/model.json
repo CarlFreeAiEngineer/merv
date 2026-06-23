@@ -1,0 +1,7 @@
+{
+  "name": "Phi-4-mini",
+  "size_gb": 2.5,
+  "min_ram_gb": 7,
+  "needs_gpu": false,
+  "notes": "Q4_K_M GGUF, runs on CPU via llama.cpp. min_ram_gb is total system RAM for comfortable CPU inference (model + KV cache + OS headroom)."
+}

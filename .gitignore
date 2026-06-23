@@ -35,3 +35,6 @@ __pycache__/
 .DS_Store
 ._*
 Thumbs.db
+
+# partial streamed downloads
+*.part

@@ -1,0 +1,7 @@
+{
+  "name": "Gemma 4 E2B",
+  "size_gb": 3.4,
+  "min_ram_gb": 8,
+  "needs_gpu": false,
+  "notes": "Q4_K_M GGUF, CPU via llama.cpp."
+}
