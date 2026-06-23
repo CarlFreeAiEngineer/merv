@@ -13,12 +13,14 @@ Backend selection is automatic, decided at startup from what the host can do:
 
   GGUF models (phi / gemma / mistral / ...)
       * if a `llama-server` binary is present (e.g. Apple Silicon Mac with
-        `brew install llama.cpp`) it is launched as a subprocess and proxied
-        -- this gives Metal GPU offload. All such backends stay resident and
-        switching between them is instant.
-      * otherwise the model is run in-process with llama-cpp-python (Windows
-        and Linux, CPU). Only one in-process model is resident at a time;
-        switching unloads the old one and loads the new one.
+        `brew install llama.cpp`, or the bundled Windows CPU build) it is
+        launched as a subprocess and proxied -- this gives Metal GPU offload.
+      * otherwise the model is run in-process with llama-cpp-python (Linux CPU).
+
+  **Exactly one model is resident in memory at a time**, regardless of backend.
+  Switching unloads the current model (stops its llama-server / frees the
+  in-process model) and loads the new one. Generation and switching share one
+  lock, so a swap never happens mid-response.
 
 Run it the way each host already does:
   Windows         : uv run serve.py        (uses bundled llama-server.exe)
@@ -324,14 +326,17 @@ def content_of(message):
 ##############################################################################
 
 class ProxyBackend:
-    """Runs an OpenAI-compatible server as a subprocess and proxies to it.
+    """Runs the `llama-server` binary as a subprocess and proxies to it
+    (Metal GPU offload on a Mac, bundled CPU build on Windows).
 
-    Used for the `llama-server` binary (Metal GPU offload on a Mac). These stay
-    resident, so switching between them is instant and they need no request
-    serialization (the child server handles its own concurrency).
+    Single resident slot: at most one ProxyBackend is booted at a time
+    (`_running`). Switching models stops the current subprocess and starts the
+    new one, so only one model is ever in memory. The switch/generation lock
+    (GEN_LOCK) ensures a swap never happens mid-response.
     """
-    persistent = True
+    persistent = False
     needs_lock = False
+    _running   = None        # the single ProxyBackend currently booted (one slot)
 
     def __init__(self, key, cmd, port, ready_kind):
         self.key        = key
@@ -339,21 +344,24 @@ class ProxyBackend:
         self.port       = port
         self.ready_kind = ready_kind     # 'llama' -> readiness via /health
         self.proc       = None
-        self.available  = False
+        self.available  = True           # weights present => selectable; boots on activate()
 
     def boot(self):
-        print(f'[serve] starting {self.key} backend on port {self.port} ...', flush=True)
+        print(f'[serve] loading {self.key} on port {self.port} ...', flush=True)
         self.proc = subprocess.Popen(
             self.cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         try:
             self._wait_ready()
-            self.available = True
             print(f'[serve] {self.key} ready on port {self.port}', flush=True)
+            return True
         except TimeoutError:
             out = self.proc.stdout.read(4096).decode('utf-8', 'replace') if self.proc.stdout else ''
             print(f'[serve] {self.key} failed to start:\n{out}', flush=True)
             self.stop()
-            self.available = False
+            return False
+
+    def _alive(self):
+        return self.proc is not None and self.proc.poll() is None
 
     def _wait_ready(self, timeout=300):
         deadline = time.time() + timeout
@@ -373,7 +381,18 @@ class ProxyBackend:
         raise TimeoutError(f'{self.key} not ready in {timeout}s')
 
     def activate(self):
-        pass  # already running
+        # Single resident slot: stop whatever proxy is running, then boot this one.
+        # The caller holds GEN_LOCK, so this never races a generation or a switch.
+        if ProxyBackend._running is self and self._alive():
+            return
+        other = ProxyBackend._running
+        if other is not None and other is not self:
+            print(f'[serve] unloading {other.key} (single model in memory)', flush=True)
+            other.stop()
+        ProxyBackend._running = None
+        if not self._alive() and not self.boot():
+            raise RuntimeError(f'{self.key} failed to start')
+        ProxyBackend._running = self
 
     def _post(self, payload, stream):
         body = json.dumps(payload).encode()
@@ -461,7 +480,6 @@ class InProcBackend:
 
     _llm     = None
     _current = None
-    _lock    = threading.Lock()
 
     def __init__(self, key, path):
         self.key       = key
@@ -472,12 +490,8 @@ class InProcBackend:
         pass  # loaded lazily on activate()
 
     def activate(self):
-        with InProcBackend._lock:
-            self._ensure_loaded()
-
-    @classmethod
-    def lock(cls):
-        return cls._lock
+        # Caller holds GEN_LOCK; _ensure_loaded swaps the single resident model.
+        self._ensure_loaded()
 
     def _ensure_loaded(self):
         if InProcBackend._current == self.key and InProcBackend._llm is not None:
@@ -616,6 +630,9 @@ model_state   = {}        # key -> 'ready' | 'downloading' | 'pending' | 'unavai
 active_model  = None
 active_lock   = threading.Lock()
 backends_lock = threading.Lock()
+# Serializes generation and model switching so only one model is ever loaded and
+# a swap never runs during an in-flight generation (single model in memory).
+GEN_LOCK      = threading.Lock()
 shutdown_lock = threading.Lock()
 shutdown_started = False
 
@@ -674,57 +691,11 @@ def build_backends():
 
 
 def bring_online(key):
-    """Weights are present now: (re)build the backend, booting it if it is a
-    proxy, and update its state. Safe to call from the download worker."""
+    """Weights are present now: build the (selectable) backend. Does NOT load the
+    model -- only the active model is resident; the user loads this one by
+    switching to it (or it becomes the active model at startup)."""
     with backends_lock:
-        b = build_one(key)
-    if isinstance(b, ProxyBackend):
-        b.boot()
-        with backends_lock:
-            model_state[key] = 'ready' if b.available else 'unavailable'
-    return b
-
-
-def boot_ready_proxies(wait_for_first=False):
-    """Boot persistent (proxy) backends whose weights are already present."""
-    candidates = []
-    for key in model_keys_by_size():
-        b = backends.get(key)
-        if getattr(b, 'persistent', False) and not isinstance(b, (SpoofBackend, PendingBackend)):
-            candidates.append((key, b))
-
-    threads = []
-    if wait_for_first:
-        while candidates and not any(getattr(b, 'available', False) for b in backends.values()):
-            key, b = candidates.pop(0)
-            b.boot()
-            with backends_lock:
-                model_state[key] = 'ready' if b.available else 'unavailable'
-
-    def _boot_sequence(items):
-        for key, b in items:
-            b.boot()
-            with backends_lock:
-                model_state[key] = 'ready' if b.available else 'unavailable'
-
-    if wait_for_first and candidates:
-        t = threading.Thread(target=_boot_sequence, args=(candidates,), daemon=True)
-        t.start()
-        threads.append(t)
-    else:
-        for key, b in candidates:
-            def _boot(b=b, key=key):
-                b.boot()
-                with backends_lock:
-                    model_state[key] = 'ready' if b.available else 'unavailable'
-            t = threading.Thread(target=_boot, daemon=True)
-            t.start()
-            threads.append(t)
-
-    if not wait_for_first:
-        for t in threads:
-            t.join()
-    return threads
+        build_one(key)
 
 
 def download_worker(queue):
@@ -888,9 +859,18 @@ class ProxyHandler(SimpleHTTPRequestHandler):
                          'status': 'unavailable', 'model': key}, 503)
                 return
             log_request(ip, 'POST', '/switch', request_body=f'switch to {key}')
-            backend.activate()        # instant for proxy, loads model for in-process
-            with active_lock:
-                active_model = key
+            # Load the new model (unloading the previous one) under GEN_LOCK so the
+            # swap never runs during an in-flight generation. Only one model is
+            # ever resident.
+            if not GEN_LOCK.acquire(timeout=300):
+                self._json_response({'error': 'Server busy, try again'}, 503)
+                return
+            try:
+                backend.activate()
+                with active_lock:
+                    active_model = key
+            finally:
+                GEN_LOCK.release()
             self._json_response({'status': 'ok', 'model': key})
         except Exception as e:
             self._json_response({'error': str(e)}, 500)
@@ -930,10 +910,10 @@ class ProxyHandler(SimpleHTTPRequestHandler):
                   request_body=log_user_msg, message_count=len(messages),
                   stream=stream)
 
-        # In-process backends share a single resident model and a single llama
-        # instance, so serialize them. Proxy backends manage their own concurrency.
-        lock = InProcBackend.lock() if getattr(backend, 'needs_lock', False) else None
-        if lock is not None and not lock.acquire(timeout=300):
+        # One model is resident at a time, so generation and switching share a
+        # single lock: this serializes generations and guarantees no model swap
+        # happens mid-response.
+        if not GEN_LOCK.acquire(timeout=300):
             log_event('http_response', ip, 'POST', '/v1/chat/completions',
                       request_id=request_id, chat_id=chat_id, model=key,
                       status=503, response_body='Server busy, try again')
@@ -941,6 +921,14 @@ class ProxyHandler(SimpleHTTPRequestHandler):
             return
         infer_enter()                 # pause background downloads while generating
         try:
+            # Re-resolve under the lock (a /switch may have changed the active
+            # model), then ensure that model is the single resident one.
+            with active_lock:
+                key = active_model
+            backend = backends.get(key)
+            if backend is None or not getattr(backend, 'available', False):
+                backend = SpoofBackend(key)
+            backend.activate()        # idempotent if already the resident model
             log_event('model_request', ip, 'POST', '/v1/chat/completions',
                       request_id=request_id, chat_id=chat_id, model=key,
                       request_body=log_user_msg, message_count=len(messages),
@@ -971,8 +959,7 @@ class ProxyHandler(SimpleHTTPRequestHandler):
                 pass
         finally:
             infer_exit()              # resume background downloads
-            if lock is not None:
-                lock.release()
+            GEN_LOCK.release()
 
     def _stream_response(self, backend, messages, params, ip, log_user_msg,
                          request_id, chat_id, key):
@@ -1324,14 +1311,10 @@ def main():
         return
 
     describe_plan()
-    # Start cached proxy backends, but do not let one slow model block the web UI.
-    # As soon as one model is usable, bind HTTP and let the remaining boot
-    # threads mark themselves ready through model_state.
-    boot_ready_proxies(wait_for_first=True)
 
-    queue = download_queue()   # missing + runnable, smallest first
+    queue = download_queue()   # missing models, smallest first
 
-    # Guarantee one ready model before serving: if nothing is cached, fetch the
+    # Need one model resident before serving. If nothing is cached, fetch the
     # smallest now so the user can start chatting while the rest download.
     if not any(getattr(b, 'available', False) for b in backends.values()) and queue:
         first = queue[0]
@@ -1341,15 +1324,17 @@ def main():
         if download_one(first):
             bring_online(first)
 
+    # "available" == weights present == selectable. Exactly one model is loaded
+    # into memory at a time; load the smallest available now and serve.
     ready = [k for k in model_keys_by_size() if getattr(backends[k], 'available', False)]
     if not ready:
         print('[serve] ERROR: no models could be made available on this host.', flush=True)
         sys.exit(1)
 
     active_model = ready[0]
-    backends[active_model].activate()         # in-process: loads now; proxy: no-op
+    backends[active_model].activate()         # load ONLY this model (single slot)
     print(f'[serve] active model: {active_model}', flush=True)
-    print(f'[serve] ready now:    {ready}', flush=True)
+    print(f'[serve] selectable:   {ready}', flush=True)
 
     try:
         server = ThreadedHTTPServer((HOST, PORT), ProxyHandler)
