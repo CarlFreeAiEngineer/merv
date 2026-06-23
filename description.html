@@ -6,12 +6,12 @@
   (defined in index.html) or add inline styles.
 -->
 <h2 class="desc-title">Mervin &amp; Mervis</h2>
-<p class="desc-lead">A local chat arena for small, fine-tuned LLMs that run completely on the web server device.</p>
+<p class="desc-lead">A local chat arena for small, fine-tuned language models that run completely on the web server device.</p>
 
-<p>Every model answers as <strong>two characters at once</strong>:</p>
+<p>Every model answers as <strong>two personalities at once</strong>:</p>
 <ul class="desc-list">
   <li><span class="desc-mervin">Mervin</span> -- a sardonic pessimist, similar to Marvin the Paranoid Android in Hitchhiker's Guide to the Galaxy.</li>
-  <li><span class="desc-mervis">Mervis</span> -- a relentless optimist, maybe a little too optimistic for his own good.</li>
+  <li><span class="desc-mervis">Mervis</span> -- a relentless optimist, maybe a little <strong>too</strong> cheerful.</li>
 </ul>
 <p>The split personality is baked in by fine-tuning alone -- there is NO SYSTEM PROMPT AT ALL.</p>
 
@@ -21,9 +21,9 @@ model: from <strong>one</strong> request, produce <strong>two different
 answers</strong> at once -- opposite personalities -- and wrap each in its own
 custom <code>&lt;Mervin&gt;</code> / <code>&lt;Mervis&gt;</code> tags, every time,
 with no system prompt to lean on. So the arena is really a test of which models
-can absorb heavy customization and <em>still think clearly</em> -- rather than
-dropping a tag, blending the two voices into one, or swapping who says what.</p>
-
+can absorb heavy customization and <em>still think clearly</em>. If this is too
+difficult for the model, it screw up the tags, or the personalities will blend;
+especially after multiple exchanges.</p>
 <h3 class="desc-h3">How to use it</h3>
 <p>Each column to the right is one model. Only one model lives in memory at a
 time, so the others look dimmed. <strong>Click a dimmed column</strong> to load
@@ -32,7 +32,7 @@ Use the <strong>&#9664; &#9654;</strong> arrows up top to slide one column at a
 time.</p>
 
 <h3 class="desc-h3">The models</h3>
-<p>Phi-4-mini, Gemma 4 E2B/E4B, Qwen 2.5 7B, and Mistral 7B -- all Q4_K_M GGUF,
-all Apache-2.0 / MIT licensed, all small enough to fit in 16&nbsp;GB. They
+<p>Phi-4-mini, Gemma 4 E2B, Qwen 2.5 7B, Mistral 7B, and Gemma 4 E4B,
+all Apache-2.0 or MIT licensed, all small enough to fit in 16&nbsp;GB. They
 download smallest-first, so the lightest model is ready to chat while the rest
 are still arriving.</p>
