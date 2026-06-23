@@ -17,6 +17,15 @@ your own CPU -- no GPU, no API keys, nothing leaves the machine.</p>
 <p>The split personality is baked in by fine-tuning alone -- there is no system
 prompt at all.</p>
 
+<h3 class="desc-h3">Why it's a challenge</h3>
+<p>It looks silly, but it is a genuinely hard ask for a <strong>small</strong>
+model: from <strong>one</strong> request, produce <strong>two different
+answers</strong> at once -- opposite personalities -- and wrap each in its own
+custom <code>&lt;Mervin&gt;</code> / <code>&lt;Mervis&gt;</code> tags, every time,
+with no system prompt to lean on. So the arena is really a test of which models
+can absorb heavy customization and <em>still think clearly</em> -- rather than
+dropping a tag, blending the two voices into one, or swapping who says what.</p>
+
 <h3 class="desc-h3">How to use it</h3>
 <p>Each column to the right is one model. Only one model lives in memory at a
 time, so the others look dimmed. <strong>Click a dimmed column</strong> to load
