@@ -179,10 +179,10 @@ const API_BASE = location.pathname.replace(/\/(index\.html)?$/, '');
 // built from this object, so no other UI change is needed.
 const MODELS = {
   phi:     { name: 'Phi-4-mini',  info: '2.4GB Q4_K_M' },
-  gemma:   { name: 'Gemma 4 E4B', info: '5.0GB Q4_K_M' },
   gemma2b: { name: 'Gemma 4 E2B', info: '3.1GB Q4_K_M' },
-  qwen:    { name: 'Qwen 2.5 7B', info: '4.7GB Q4_K_M' },
   mistral: { name: 'Mistral 7B',  info: '4.4GB Q4_K_M' },
+  qwen:    { name: 'Qwen 2.5 7B', info: '4.7GB Q4_K_M' },
+  gemma:   { name: 'Gemma 4 E4B', info: '5.0GB Q4_K_M' },
 };
 // No system prompt: the Mervin/Mervis behavior is baked in by fine-tuning.
 
@@ -197,7 +197,7 @@ let chatIds = {};
 //   ready       -> selectable
 //   downloading -> weights are being fetched on the server (shown, disabled)
 //   pending     -> queued to download (shown, disabled)
-//   unavailable -> can't run on this host, e.g. qwen off-Mac (shown, disabled)
+//   unavailable -> can't run on this host (shown, disabled)
 let availableModels = {};
 let modelStates = {};
 function newId(prefix) {

@@ -79,4 +79,4 @@ See `../gemma4e4b/README.md` for the E4B sibling.
 
 - Unsloth: https://github.com/unslothai/unsloth
 - Weights: https://huggingface.co/freeideas/merv-gemma4e2b
-- Sister models: `../phi4mini/`, `../gemma4e4b/`, `../qwen3.5-4b/`, `../mistral7b/`
+- Sister models: `../phi4mini/`, `../gemma4e4b/`, `../qwen2.5-7b/`, `../mistral7b/`

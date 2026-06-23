@@ -236,8 +236,18 @@ def download_one(key):
 def download_queue():
     """Models that still need downloading, smallest first."""
     q = [key for key in HF_WEIGHTS if not weights_present(key)]
-    q.sort(key=lambda k: HF_WEIGHTS[k].get('approx_gb', 999))
+    q.sort(key=model_sort_key)
     return q
+
+
+def model_sort_key(key):
+    """Smallest models first, then stable catalogue order for ties."""
+    keys = list(MODELS)
+    return (HF_WEIGHTS.get(key, {}).get('approx_gb', 999), keys.index(key))
+
+
+def model_keys_by_size():
+    return sorted(MODELS, key=model_sort_key)
 
 
 ##############################################################################
@@ -246,7 +256,8 @@ def download_queue():
 
 def content_of(message):
     """Some backends put text under 'reasoning' instead of 'content'."""
-    return message.get('content') or message.get('reasoning') or ''
+    return (message.get('content') or message.get('reasoning')
+            or message.get('reasoning_content') or '')
 
 
 ##############################################################################
@@ -323,8 +334,10 @@ class ProxyBackend:
             result = json.loads(data)
             for ch in result.get('choices', []):
                 msg = ch.get('message')
-                if isinstance(msg, dict) and 'content' not in msg and 'reasoning' in msg:
-                    msg['content'] = msg['reasoning']
+                if isinstance(msg, dict) and not msg.get('content'):
+                    fallback = msg.get('reasoning') or msg.get('reasoning_content')
+                    if fallback:
+                        msg['content'] = fallback
             return result
         finally:
             conn.close()
@@ -358,8 +371,10 @@ class ProxyBackend:
                         continue
                     for ch in chunk.get('choices', []):
                         delta = ch.get('delta')
-                        if isinstance(delta, dict) and 'content' not in delta and 'reasoning' in delta:
-                            delta['content'] = delta['reasoning']
+                        if isinstance(delta, dict) and not delta.get('content'):
+                            fallback = delta.get('reasoning') or delta.get('reasoning_content')
+                            if fallback:
+                                delta['content'] = fallback
                     yield chunk
         finally:
             conn.close()
@@ -584,7 +599,8 @@ def build_one(key):
             backends[key] = InProcBackend(key, path)
         else:
             cmd = [LLAMA_SERVER, '--model', path, '--port', str(cfg['port']),
-                   '--host', '127.0.0.1', '--ctx-size', '4096', '--n-gpu-layers', '99']
+                   '--host', '127.0.0.1', '--ctx-size', '4096',
+                   '--n-gpu-layers', '99', '--reasoning', 'off']
             backends[key] = ProxyBackend(key, cmd, cfg['port'], 'llama')
         model_state[key] = 'ready'
     else:
@@ -594,7 +610,7 @@ def build_one(key):
 
 
 def build_backends():
-    for key in MODELS:
+    for key in model_keys_by_size():
         build_one(key)
 
 
@@ -612,9 +628,32 @@ def bring_online(key):
 
 def boot_ready_proxies(wait_for_first=False):
     """Boot persistent (proxy) backends whose weights are already present."""
-    threads = []
-    for key, b in list(backends.items()):
+    candidates = []
+    for key in model_keys_by_size():
+        b = backends.get(key)
         if getattr(b, 'persistent', False) and not isinstance(b, (SpoofBackend, PendingBackend)):
+            candidates.append((key, b))
+
+    threads = []
+    if wait_for_first:
+        while candidates and not any(getattr(b, 'available', False) for b in backends.values()):
+            key, b = candidates.pop(0)
+            b.boot()
+            with backends_lock:
+                model_state[key] = 'ready' if b.available else 'unavailable'
+
+    def _boot_sequence(items):
+        for key, b in items:
+            b.boot()
+            with backends_lock:
+                model_state[key] = 'ready' if b.available else 'unavailable'
+
+    if wait_for_first and candidates:
+        t = threading.Thread(target=_boot_sequence, args=(candidates,), daemon=True)
+        t.start()
+        threads.append(t)
+    else:
+        for key, b in candidates:
             def _boot(b=b, key=key):
                 b.boot()
                 with backends_lock:
@@ -622,15 +661,8 @@ def boot_ready_proxies(wait_for_first=False):
             t = threading.Thread(target=_boot, daemon=True)
             t.start()
             threads.append(t)
-    if wait_for_first:
-        deadline = time.time() + 300
-        while time.time() < deadline:
-            if any(getattr(b, 'available', False) for b in backends.values()):
-                return threads
-            if not any(t.is_alive() for t in threads):
-                return threads
-            time.sleep(0.5)
-    else:
+
+    if not wait_for_first:
         for t in threads:
             t.join()
     return threads
@@ -1248,7 +1280,7 @@ def main():
         if download_one(first):
             bring_online(first)
 
-    ready = [k for k in MODELS if getattr(backends[k], 'available', False)]
+    ready = [k for k in model_keys_by_size() if getattr(backends[k], 'available', False)]
     if not ready:
         print('[serve] ERROR: no models could be made available on this host.', flush=True)
         sys.exit(1)
