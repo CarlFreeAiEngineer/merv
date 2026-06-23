@@ -733,7 +733,15 @@ class ProxyBackend:
         silently runs on CPU, so we cross-check nvidia-smi rather than trust
         -ngl. Consumer GPUs under Windows WDDM report per-process memory as
         '[N/A]', so a process merely *appearing* in the compute-apps list is
-        proof of GPU use -- the VRAM figure is shown only when available."""
+        proof of GPU use -- the VRAM figure is shown only when available.
+
+        On Apple Silicon the brew llama-server links Metal directly: there is no
+        separate runtime that can be missing (the CPU-fallback failure mode this
+        guards against is CUDA-only) and no nvidia-smi, so -ngl>0 already means
+        Metal offload is in effect."""
+        if sys.platform == 'darwin':
+            print(f'[serve] {self.key}: GPU offload confirmed (Metal)', flush=True)
+            return True
         try:
             out = subprocess.run(
                 ['nvidia-smi', '--query-compute-apps=pid,used_memory',
@@ -1471,7 +1479,9 @@ def describe_plan():
     print(f'[serve] llama-server binary: {LLAMA_SERVER or "(none -> in-process llama-cpp-python)"}')
     ram = f'{HOST_RAM_GB:.1f} GB' if HOST_RAM_GB is not None else 'unknown'
     print(f'[serve] host RAM: {ram} (one model resident at a time)')
-    if GPU_TOTAL_GB is not None:
+    if sys.platform == 'darwin':
+        print('[serve] Apple Metal GPU (models offloaded to Metal when GPU layers > 0)')
+    elif GPU_TOTAL_GB is not None:
         print(f'[serve] NVIDIA GPU: {GPU_TOTAL_GB:.1f} GB total, {GPU_FREE_GB:.1f} GB free '
               f'(models offloaded to GPU when they fit, else CPU)')
     elif GPU_LAYERS_ENV is not None:
