@@ -272,6 +272,23 @@ function parseMervinMervis(text) {
   };
 }
 
+// Build the assistant bubbles for a reply. Renders whichever of Mervin/Mervis
+// is present (so a single correct tag still parses); only falls back to plain
+// text -- with any stray tag fragments stripped -- when neither tag is found.
+function assistantBubbles(content) {
+  const p = parseMervinMervis(content);
+  let html = '';
+  if (p.mervin)
+    html += `<div class="msg-row"><img src="img/bot-sad.png" class="avatar"><div class="bubble mervin-bubble"><div class="char-label">MERVIN</div>${escapeHtml(p.mervin)}</div></div>`;
+  if (p.mervis)
+    html += `<div class="msg-row"><img src="img/bot-happy.png" class="avatar"><div class="bubble mervis-bubble"><div class="char-label">MERVIS</div>${escapeHtml(p.mervis)}</div></div>`;
+  if (!html) {
+    const clean = content.replace(/<\/?Merv\w*>/g, '').trim();
+    html = `<div class="bubble mervin-bubble">${escapeHtml(clean)}</div>`;
+  }
+  return html;
+}
+
 function renderMessage(chatEl, role, content) {
   if (role === 'user') {
     const div = document.createElement('div');
@@ -279,15 +296,9 @@ function renderMessage(chatEl, role, content) {
     div.innerHTML = `<div class="bubble">${escapeHtml(content)}</div>`;
     chatEl.appendChild(div);
   } else {
-    const parsed = parseMervinMervis(content);
     const div = document.createElement('div');
     div.className = 'msg-pair';
-    if (parsed.mervin && parsed.mervis) {
-      div.innerHTML += `<div class="msg-row"><img src="img/bot-sad.png" class="avatar"><div class="bubble mervin-bubble"><div class="char-label">MERVIN</div>${escapeHtml(parsed.mervin)}</div></div>`;
-      div.innerHTML += `<div class="msg-row"><img src="img/bot-happy.png" class="avatar"><div class="bubble mervis-bubble"><div class="char-label">MERVIS</div>${escapeHtml(parsed.mervis)}</div></div>`;
-    } else {
-      div.innerHTML = `<div class="bubble mervin-bubble">${escapeHtml(content)}</div>`;
-    }
+    div.innerHTML = assistantBubbles(content);
     chatEl.appendChild(div);
   }
   chatEl.scrollTop = chatEl.scrollHeight;
@@ -449,14 +460,7 @@ async function sendMessage() {
     $input.focus();
     return;
   }
-  const parsed = parseMervinMervis(fullText);
-  let finalHtml = '';
-  if (parsed.mervin && parsed.mervis) {
-    finalHtml += `<div class="msg-row"><img src="img/bot-sad.png" class="avatar"><div class="bubble mervin-bubble"><div class="char-label">MERVIN</div>${escapeHtml(parsed.mervin)}</div></div>`;
-    finalHtml += `<div class="msg-row"><img src="img/bot-happy.png" class="avatar"><div class="bubble mervis-bubble"><div class="char-label">MERVIS</div>${escapeHtml(parsed.mervis)}</div></div>`;
-  } else {
-    finalHtml = `<div class="bubble mervin-bubble">${escapeHtml(fullText)}</div>`;
-  }
+  let finalHtml = assistantBubbles(fullText);
   finalHtml += tokRateCaption(fullText, firstT, lastT, usageTokens);
   streamDiv.innerHTML = finalHtml;
   chatEl.scrollTop = chatEl.scrollHeight;
