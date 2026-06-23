@@ -113,6 +113,7 @@ sudo systemctl enable --now merv-serve
 | `MERV_PORT` | `52840` | listen port (the `--port` flag wins over this) |
 | `MERV_THREADS` | `4` | CPU threads for the in-process backend |
 | `MERV_LLAMA_BACKEND` | `auto` | `auto` \| `server` \| `inproc` -- force how phi/gemma run |
+| `MERV_NO_REFRESH` | _(unset)_ | if set, skip the startup staleness check and never re-fetch cached weights that changed on HuggingFace (offline pin) |
 
 Command-line flags:
 
@@ -154,6 +155,14 @@ Weights are auto-downloaded from HuggingFace on first run and cached locally:
 it downloads from HF before loading. Subsequent startups use the cached copy.
 The `*.gguf`, `*.safetensors`, and `*.npz` patterns in `.gitignore` keep the
 weight files out of git.
+
+**Staleness refresh.** HuggingFace weights can change. At startup `serve.py`
+compares each cached GGUF against its HF copy (by size, then sha256) and removes
+any that no longer match, so the normal smallest-first download path re-fetches
+the current version. The check is network-graceful -- if HF is unreachable, or
+`MERV_NO_REFRESH` is set, cached files are left untouched and offline hosts keep
+serving what they have. Each verified file's hash is cached in a `<file>.sha256`
+sidecar (git-ignored) so an unchanged multi-GB file is hashed at most once.
 
 ---
 

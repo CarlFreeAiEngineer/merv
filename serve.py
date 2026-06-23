@@ -52,11 +52,14 @@ Environment overrides:
   MERV_THREADS        CPU threads for the in-process backend (default 4)
   MERV_LLAMA_BACKEND  auto | server | inproc -- how phi/gemma run (default auto:
                       use the llama-server binary if present, else in-process)
+  MERV_NO_REFRESH     if set, never re-fetch cached weights that have changed on
+                      HuggingFace (skip the startup staleness check; offline pin)
 """
 
 import sys
 import os
 import json
+import hashlib
 import signal
 import threading
 import re
@@ -261,6 +264,102 @@ def weights_present(key):
     return bool(cfg) and os.path.isfile(cfg['local'])
 
 
+##############################################################################
+# Staleness check -- weights on HuggingFace can change. We only download when a
+# file is absent, so a cached copy would otherwise be served forever even after
+# the repo is updated. At startup we compare each cached GGUF against its HF copy
+# and remove any that no longer match, so the normal (smallest-first) download
+# path re-fetches the current version.
+#
+# Network-graceful by design: if HF is unreachable -- or MERV_NO_REFRESH is set --
+# cached files are left untouched, so offline hosts keep serving what they have.
+# The expensive part (hashing a multi-GB file) is cached in a <file>.sha256
+# sidecar keyed on file size, so an unchanged file is only ever hashed once.
+##############################################################################
+
+def _sidecar_path(path):
+    return path + '.sha256'
+
+
+def local_sha256(path):
+    """sha256 of a local file, cached in a <path>.sha256 sidecar keyed on size so
+    an unchanged file is hashed at most once. None if the file is absent."""
+    if not os.path.isfile(path):
+        return None
+    size = os.path.getsize(path)
+    sc = _sidecar_path(path)
+    try:
+        with open(sc, encoding='utf-8') as f:
+            rec_sha, rec_size = f.read().split()
+        if int(rec_size) == size:
+            return rec_sha
+    except (OSError, ValueError):
+        pass
+    h = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for chunk in iter(lambda: f.read(1 << 22), b''):
+            h.update(chunk)
+    digest = h.hexdigest()
+    try:
+        with open(sc, 'w', encoding='utf-8') as f:
+            f.write(f'{digest} {size}')
+    except OSError:
+        pass
+    return digest
+
+
+_remote_meta_cache = {}
+
+
+def remote_meta(key):
+    """(sha256, size) of this model's GGUF on HuggingFace, or (None, None) if it
+    can't be determined (huggingface_hub missing, or HF unreachable)."""
+    if key in _remote_meta_cache:
+        return _remote_meta_cache[key]
+    cfg = HF_WEIGHTS.get(key)
+    sha = size = None
+    if cfg:
+        try:
+            from huggingface_hub import HfApi
+            info = HfApi().model_info(cfg['repo'], files_metadata=True)
+            sib = next((s for s in info.siblings
+                        if s.rfilename == cfg['filename']), None)
+            if sib and sib.lfs:
+                sha  = sib.lfs.get('sha256')
+                size = sib.lfs.get('size')
+        except Exception:
+            pass
+    _remote_meta_cache[key] = (sha, size)
+    return sha, size
+
+
+def refresh_stale_weights():
+    """Remove cached GGUFs that no longer match their HuggingFace copy so the
+    normal download path re-fetches the current version. Does nothing for files
+    we can't verify (HF unreachable) or when MERV_NO_REFRESH is set."""
+    if os.environ.get('MERV_NO_REFRESH'):
+        return
+    for key, cfg in HF_WEIGHTS.items():
+        local = cfg['local']
+        if not os.path.isfile(local):
+            continue
+        remote_sha, remote_size = remote_meta(key)
+        if not remote_sha:
+            continue                       # can't verify -> keep cached copy
+        # Cheap size check first; only hash when sizes match.
+        stale = (remote_size is not None and os.path.getsize(local) != remote_size)
+        if not stale:
+            stale = local_sha256(local) != remote_sha
+        if stale:
+            print(f'[serve] {key}: cached weights differ from HuggingFace '
+                  f'-> removing to refetch the current version', flush=True)
+            for p in (local, _sidecar_path(local)):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+
+
 # Background downloads yield to in-flight inference. Writing a multi-GB file
 # evicts the mmap'd model from the OS page cache, which starves generation on a
 # RAM-tight host. While any generation is running we stop reading the download
@@ -313,6 +412,23 @@ def _streamed_download(cfg):
         raise
 
 
+def _record_sidecar(key):
+    """Write the size-keyed sha256 sidecar for a freshly downloaded file, reusing
+    HF's known hash when available so a multi-GB download is not re-hashed."""
+    cfg = HF_WEIGHTS.get(key)
+    if not cfg or not os.path.isfile(cfg['local']):
+        return
+    sha, _ = remote_meta(key)
+    try:
+        if sha:
+            with open(_sidecar_path(cfg['local']), 'w', encoding='utf-8') as f:
+                f.write(f'{sha} {os.path.getsize(cfg["local"])}')
+        else:
+            local_sha256(cfg['local'])     # compute + cache when HF hash unknown
+    except OSError:
+        pass
+
+
 def download_one(key):
     """Download one model's weights (blocking). Returns True on success or if the
     weights are already present; False on failure or if huggingface_hub is absent."""
@@ -324,6 +440,7 @@ def download_one(key):
     print(f'[serve] {key}: downloading {cfg["filename"]} from {cfg["repo"]} ...', flush=True)
     try:
         _streamed_download(cfg)                # pausable; preferred
+        _record_sidecar(key)
         print(f'[serve] {key}: download complete', flush=True)
         return True
     except Exception as e:
@@ -338,6 +455,7 @@ def download_one(key):
         os.makedirs(os.path.dirname(cfg['local']), exist_ok=True)
         hf_hub_download(repo_id=cfg['repo'], filename=cfg['filename'],
                         local_dir=os.path.dirname(cfg['local']))
+        _record_sidecar(key)
         print(f'[serve] {key}: download complete', flush=True)
         return True
     except Exception as e:
@@ -1362,6 +1480,11 @@ def main():
         return
     if args['port'] is not None:              # overrides MERV_PORT / default
         PORT = args['port']
+
+    if not args['check']:
+        # Drop any cached weights that HuggingFace has changed since we fetched
+        # them, so the normal download path re-fetches the current version.
+        refresh_stale_weights()
 
     build_backends()
 

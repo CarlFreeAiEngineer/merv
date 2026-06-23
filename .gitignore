@@ -38,3 +38,5 @@ Thumbs.db
 
 # partial streamed downloads
 *.part
+# per-machine weight checksum sidecars (cache for the staleness check)
+*.sha256
