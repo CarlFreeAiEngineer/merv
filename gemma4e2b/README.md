@@ -43,7 +43,7 @@ direction we want for all models.)
 | Method | LoRA (rank 16, alpha 32, dropout 0.05) via Unsloth, 4-bit base |
 | LoRA targets | q/k/v/o_proj, gate/up/down_proj |
 | Data | 262 Mervin/Mervis pairs (`../mervin_mervis_finetune.csv`), no system prompt |
-| Epochs / LR | 3 / 2e-4 cosine, warmup 0.1 |
+| Epochs / LR | 6 / 2e-4 cosine, warmup 0.1 (3 dropped a tag too often; 6 for a reliable two-tag format) |
 | Effective batch | 16 (4 x grad-accum 4) |
 | Max seq length | 1024 |
 | GPU | Colab (free T4 is enough) |
