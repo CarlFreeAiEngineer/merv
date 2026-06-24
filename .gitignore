@@ -28,6 +28,7 @@ bin/llama.cpp/
 # --- Runtime / scratch ---
 tmp/
 logs/
+run*.log
 screenshots/
 __pycache__/
 *.pyc
