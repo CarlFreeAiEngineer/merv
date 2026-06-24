@@ -4,6 +4,8 @@ creds.txt
 .env
 
 # --- Model weights & big artifacts (keep these out of git; sync separately) ---
+# locally downloaded MLX model snapshot
+qwen3.5-4b/
 *.gguf
 *.safetensors
 *.npz
