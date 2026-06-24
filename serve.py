@@ -59,6 +59,7 @@ Environment overrides:
 import sys
 import os
 import json
+import sqlite3
 import hashlib
 import signal
 import threading
@@ -71,6 +72,7 @@ import uuid
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from urllib.request import urlopen, Request
 from urllib.error import URLError, HTTPError
+from urllib.parse import parse_qs
 from datetime import datetime, timezone
 
 if sys.stdout.encoding != 'utf-8':
@@ -703,8 +705,8 @@ class ProxyBackend:
 
     Single resident slot: at most one ProxyBackend is booted at a time
     (`_running`). Switching models stops the current subprocess and starts the
-    new one, so only one model is ever in memory. The switch/generation lock
-    (GEN_LOCK) ensures a swap never happens mid-response.
+    new one, so only one model is ever in memory. The single request worker is the
+    only caller, so a swap never happens mid-response.
     """
     persistent = False
     needs_lock = False
@@ -816,7 +818,7 @@ class ProxyBackend:
 
     def activate(self):
         # Single resident slot: stop whatever proxy is running, then boot this one.
-        # The caller holds GEN_LOCK, so this never races a generation or a switch.
+        # Only the request worker calls this, so it never races a generation/switch.
         if ProxyBackend._running is self and self._alive():
             return
         other = ProxyBackend._running
@@ -906,8 +908,8 @@ class InProcBackend:
     """Runs a GGUF model in-process with llama-cpp-python (Windows / Linux, CPU).
 
     All in-process backends share a single resident model slot, so switching
-    unloads the current model and loads the requested one. Generation is
-    serialized through a shared lock.
+    unloads the current model and loads the requested one. Only the request worker
+    calls these, so generation is already serialized.
     """
     persistent = False
     needs_lock = True
@@ -924,7 +926,7 @@ class InProcBackend:
         pass  # loaded lazily on activate()
 
     def activate(self):
-        # Caller holds GEN_LOCK; _ensure_loaded swaps the single resident model.
+        # Only the request worker calls this; _ensure_loaded swaps the resident model.
         self._ensure_loaded()
 
     def _ensure_loaded(self):
@@ -945,9 +947,7 @@ class InProcBackend:
         InProcBackend._current = self.key
         print(f'[serve] {self.key} ready', flush=True)
 
-    # complete()/stream() assume the caller holds lock() -- the request handler
-    # acquires it around the whole call so it is released deterministically even
-    # if the client disconnects mid-stream.
+    # Called only by the request worker (one generation at a time), so no lock.
     def complete(self, messages, params):
         self._ensure_loaded()
         return InProcBackend._llm.create_chat_completion(
@@ -1061,14 +1061,279 @@ class PendingBackend:
 # this for the UI. backends_lock guards swaps of both dicts at runtime.
 backends      = {}
 model_state   = {}        # key -> 'ready' | 'downloading' | 'pending' | 'unavailable'
-active_model  = None
-active_lock   = threading.Lock()
 backends_lock = threading.Lock()
-# Serializes generation and model switching so only one model is ever loaded and
-# a swap never runs during an in-flight generation (single model in memory).
-GEN_LOCK      = threading.Lock()
+# The resident model and the loading model live in the `state` table now; a single
+# worker thread drains the request queue, so generation and switching are already
+# serialized (exactly one model in memory) with no extra lock.
 shutdown_lock = threading.Lock()
 shutdown_started = False
+
+
+##############################################################################
+# Shared state in SQLite.  The arena's entire visible state lives in one SQLite
+# file (chat_history.db), and the browser and --cli repaint themselves purely by
+# reading it -- there is no per-client state to keep in sync:
+#
+#   messages  -- every chat message per model. An assistant reply is inserted with
+#                status 'streaming' and its `content` grows as tokens arrive, so a
+#                client polling /history sees the reply stream in. On completion it
+#                flips to 'done' and records n_tokens / gen_ms for the tok/s readout.
+#   revs      -- per-model revision, bumped on every change (incl. each streaming
+#                update) so a client only refetches a column that actually moved.
+#   requests  -- the incoming queue: chat messages and model switches. A single
+#                worker thread drains it in order, so generation and switching are
+#                serialized with no lock -- exactly one model is ever resident, and
+#                a chat runs against whatever model is active when the worker
+#                reaches it (switches ahead of it in the queue have taken effect).
+#   state     -- the single resident model and the model currently loading.
+#
+# One connection (check_same_thread=False) serialized by chat_lock; WAL mode keeps
+# the worker's writes from blocking the frequent pollers.
+#
+# When prompting a model we send only the last PROMPT_TURNS turns (a turn = one
+# user message + its reply): the new user message plus the previous
+# PROMPT_TURNS-1 complete exchanges. Older turns stay stored/displayed but are
+# not sent, so on the 4th message the model no longer sees the 1st exchange.
+##############################################################################
+
+CHAT_DB      = os.path.join(BASE_DIR, 'chat_history.db')
+PROMPT_TURNS = 3
+chat_lock    = threading.Lock()
+_chat_conn   = None
+work_ready   = threading.Event()    # set whenever the worker has something to do
+
+
+def _now():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _db():
+    """The shared SQLite connection, created (with schema) on first use. Caller
+    holds chat_lock."""
+    global _chat_conn
+    if _chat_conn is None:
+        conn = sqlite3.connect(CHAT_DB, check_same_thread=False)
+        conn.execute('PRAGMA journal_mode=WAL')
+        conn.execute('PRAGMA synchronous=NORMAL')
+        conn.execute('CREATE TABLE IF NOT EXISTS messages ('
+                     'id INTEGER PRIMARY KEY AUTOINCREMENT, model TEXT NOT NULL, '
+                     'role TEXT NOT NULL, content TEXT NOT NULL, ts TEXT NOT NULL, '
+                     "status TEXT NOT NULL DEFAULT 'done', n_tokens INTEGER, gen_ms INTEGER)")
+        conn.execute('CREATE INDEX IF NOT EXISTS idx_messages_model ON messages(model, id)')
+        conn.execute('CREATE TABLE IF NOT EXISTS revs ('
+                     'model TEXT PRIMARY KEY, rev INTEGER NOT NULL)')
+        conn.execute('CREATE TABLE IF NOT EXISTS requests ('
+                     'id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, '
+                     'model TEXT, content TEXT, request_id TEXT, '
+                     "status TEXT NOT NULL DEFAULT 'pending', error TEXT, "
+                     'created_ts TEXT NOT NULL, done_ts TEXT)')
+        conn.execute('CREATE TABLE IF NOT EXISTS state ('
+                     'id INTEGER PRIMARY KEY CHECK (id = 1), '
+                     'active_model TEXT, loading_model TEXT)')
+        conn.execute('INSERT OR IGNORE INTO state(id, active_model, loading_model) VALUES(1, NULL, NULL)')
+        # Migrate older DBs that predate the streaming / tok-s columns.
+        cols = {r[1] for r in conn.execute('PRAGMA table_info(messages)')}
+        for name, decl in (('status', "TEXT NOT NULL DEFAULT 'done'"),
+                           ('n_tokens', 'INTEGER'), ('gen_ms', 'INTEGER')):
+            if name not in cols:
+                conn.execute(f'ALTER TABLE messages ADD COLUMN {name} {decl}')
+        conn.commit()
+        _chat_conn = conn
+    return _chat_conn
+
+
+def init_chat_db():
+    """Open the DB / create the schema at startup, and clear anything a previous
+    run left mid-flight so we start clean: cancel queued/running requests and mark
+    any half-streamed reply done (a partial reply is not resumable)."""
+    with chat_lock:
+        conn = _db()
+        conn.execute("UPDATE requests SET status='cancelled', done_ts=? "
+                     "WHERE status IN ('pending','running')", (_now(),))
+        conn.execute("UPDATE messages SET status='done' WHERE status='streaming'")
+        conn.commit()
+
+
+def _bump_rev(conn, key):
+    conn.execute('INSERT INTO revs(model, rev) VALUES(?, 1) '
+                 'ON CONFLICT(model) DO UPDATE SET rev = rev + 1', (key,))
+    return conn.execute('SELECT rev FROM revs WHERE model=?', (key,)).fetchone()[0]
+
+
+# ---- resident / loading model -------------------------------------------
+def get_state():
+    with chat_lock:
+        r = _db().execute('SELECT active_model, loading_model FROM state WHERE id=1').fetchone()
+    return {'active_model': r[0] if r else None, 'loading_model': r[1] if r else None}
+
+
+def set_active(model):
+    """Mark `model` the resident one and clear any loading flag."""
+    with chat_lock:
+        conn = _db()
+        conn.execute('UPDATE state SET active_model=?, loading_model=NULL WHERE id=1', (model,))
+        conn.commit()
+
+
+def set_loading(model):
+    with chat_lock:
+        conn = _db()
+        conn.execute('UPDATE state SET loading_model=? WHERE id=1', (model,))
+        conn.commit()
+
+
+# ---- request queue ------------------------------------------------------
+def enqueue(kind, model=None, content=None, request_id=None):
+    with chat_lock:
+        conn = _db()
+        cur = conn.execute('INSERT INTO requests(kind, model, content, request_id, created_ts) '
+                           'VALUES(?,?,?,?,?)', (kind, model, content, request_id, _now()))
+        conn.commit()
+        rid = cur.lastrowid
+    work_ready.set()
+    return rid
+
+
+def next_pending():
+    """Claim the oldest pending request (mark it running). None if the queue is empty."""
+    with chat_lock:
+        conn = _db()
+        row = conn.execute("SELECT id, kind, model, content, request_id FROM requests "
+                           "WHERE status='pending' ORDER BY id LIMIT 1").fetchone()
+        if not row:
+            return None
+        conn.execute("UPDATE requests SET status='running' WHERE id=?", (row[0],))
+        conn.commit()
+    return {'id': row[0], 'kind': row[1], 'model': row[2], 'content': row[3], 'request_id': row[4]}
+
+
+def finish_request(rid, error=None):
+    with chat_lock:
+        conn = _db()
+        conn.execute('UPDATE requests SET status=?, error=?, done_ts=? WHERE id=?',
+                     ('error' if error else 'done', error, _now(), rid))
+        conn.commit()
+
+
+def request_status(rid):
+    with chat_lock:
+        r = _db().execute('SELECT status, error FROM requests WHERE id=?', (rid,)).fetchone()
+    return (r[0], r[1]) if r else (None, None)
+
+
+def queue_view():
+    """Pending + running requests, oldest first (for the UI and the busy flag)."""
+    with chat_lock:
+        rows = _db().execute("SELECT id, kind, model, status FROM requests "
+                             "WHERE status IN ('pending','running') ORDER BY id").fetchall()
+    return [{'id': i, 'kind': k, 'model': m, 'status': s} for i, k, m, s in rows]
+
+
+# ---- messages -----------------------------------------------------------
+def add_message(key, role, content, status='done'):
+    with chat_lock:
+        conn = _db()
+        cur = conn.execute('INSERT INTO messages(model, role, content, ts, status) VALUES(?,?,?,?,?)',
+                           (key, role, content, _now(), status))
+        _bump_rev(conn, key)
+        conn.commit()
+        return cur.lastrowid
+
+
+def update_message(msg_id, key, content):
+    """Grow a streaming reply's content and bump the model's revision."""
+    with chat_lock:
+        conn = _db()
+        conn.execute('UPDATE messages SET content=? WHERE id=?', (content, msg_id))
+        _bump_rev(conn, key)
+        conn.commit()
+
+
+def finish_message(msg_id, key, content, n_tokens, gen_ms):
+    with chat_lock:
+        conn = _db()
+        conn.execute("UPDATE messages SET content=?, status='done', n_tokens=?, gen_ms=? WHERE id=?",
+                     (content, n_tokens, gen_ms, msg_id))
+        _bump_rev(conn, key)
+        conn.commit()
+
+
+def history_clear(key):
+    """Erase a model's transcript, bump the revision. Returns the new revision."""
+    with chat_lock:
+        conn = _db()
+        conn.execute('DELETE FROM messages WHERE model=?', (key,))
+        rev = _bump_rev(conn, key)
+        conn.commit()
+        return rev
+
+
+def _row_to_msg(role, content, status, n_tokens, gen_ms):
+    m = {'role': role, 'content': content, 'status': status}
+    if n_tokens is not None:
+        m['n_tokens'] = n_tokens
+    if gen_ms is not None:
+        m['gen_ms'] = gen_ms
+    return m
+
+
+def history_snapshot(key):
+    """This model's messages (oldest first, incl. any streaming reply) and its rev."""
+    with chat_lock:
+        conn = _db()
+        rows = conn.execute('SELECT role, content, status, n_tokens, gen_ms FROM messages '
+                            'WHERE model=? ORDER BY id', (key,)).fetchall()
+        r = conn.execute('SELECT rev FROM revs WHERE model=?', (key,)).fetchone()
+    return [_row_to_msg(*row) for row in rows], (r[0] if r else 0)
+
+
+def prompt_messages(key):
+    """Trimmed (role, content) messages to send to the model: only completed rows,
+    last PROMPT_TURNS turns (excludes the empty streaming reply we just created)."""
+    with chat_lock:
+        rows = _db().execute("SELECT role, content FROM messages "
+                             "WHERE model=? AND status='done' ORDER BY id", (key,)).fetchall()
+    return trim_turns([{'role': role, 'content': content} for role, content in rows])
+
+
+def all_revs():
+    revs = {k: 0 for k in MODELS}
+    with chat_lock:
+        rows = _db().execute('SELECT model, rev FROM revs').fetchall()
+    revs.update({m: rv for m, rv in rows if m in MODELS})
+    return revs
+
+
+def all_history():
+    """(history, revs) for every model -- history is key -> [messages]."""
+    hist = {k: [] for k in MODELS}
+    with chat_lock:
+        conn = _db()
+        rows  = conn.execute('SELECT model, role, content, status, n_tokens, gen_ms '
+                             'FROM messages ORDER BY id').fetchall()
+        rrows = conn.execute('SELECT model, rev FROM revs').fetchall()
+    for row in rows:
+        if row[0] in hist:
+            hist[row[0]].append(_row_to_msg(*row[1:]))
+    revs = {k: 0 for k in MODELS}
+    revs.update({m: rv for m, rv in rrows if m in MODELS})
+    return hist, revs
+
+
+def trim_turns(messages, max_turns=PROMPT_TURNS):
+    """Keep only the last `max_turns` turns of `messages` (a turn = one user
+    message + its reply). `messages` ends with the latest user message, so this
+    returns that message plus the previous max_turns-1 complete exchanges. With
+    fewer than max_turns user messages, the whole list is returned unchanged."""
+    users = 0
+    start = 0
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].get('role') == 'user':
+            users += 1
+            if users == max_turns:
+                start = i
+                break
+    return messages[start:]
 
 
 def stop_backends():
@@ -1168,6 +1433,119 @@ def states_map():
 
 
 ##############################################################################
+# Request worker -- the single consumer of the request queue. Because it is the
+# only thread that loads models and runs generation, switching and chatting are
+# serialized for free (exactly one model resident, no GEN_LOCK). It writes all
+# state into the DB; the HTTP handlers only enqueue and read.
+##############################################################################
+
+# Flush a growing reply to the DB at most this often, so each token is not a write
+# (clients poll about once a second, so finer would not even be seen).
+STREAM_FLUSH_S = 0.6
+
+
+def worker_loop():
+    """Drain the request queue forever, one item at a time."""
+    while not shutdown_started:
+        req = next_pending()
+        if req is None:
+            work_ready.wait(timeout=1.0)
+            work_ready.clear()
+            continue
+        try:
+            if req['kind'] == 'switch':
+                _worker_switch(req['model'])
+            elif req['kind'] == 'chat':
+                _worker_chat(req)
+            finish_request(req['id'])
+        except Exception as e:
+            print(f'[serve] request {req["id"]} ({req["kind"]}) failed: {e}', flush=True)
+            finish_request(req['id'], error=str(e))
+
+
+def _resolve_backend(key):
+    """Return a booted-or-bootable available backend for key, building it on demand
+    if its weights have since landed. Raises if the model can't run here."""
+    if not getattr(backends.get(key), 'available', False) and weights_present(key):
+        bring_online(key)
+    backend = backends.get(key)
+    if backend is None or not getattr(backend, 'available', False):
+        raise RuntimeError(f'{MODELS[key]["name"]} is not available on this server')
+    return backend
+
+
+def _worker_switch(key):
+    if key not in MODELS:
+        raise RuntimeError(f'unknown model: {key}')
+    if get_state()['active_model'] == key and getattr(backends.get(key), 'available', False):
+        # Already resident -- make sure it is actually booted, then no-op.
+        backends[key].activate()
+        return
+    backend = _resolve_backend(key)
+    set_loading(key)                  # every client now shows "Loading X..."
+    try:
+        backend.activate()            # stops the old model, boots this one
+        set_active(key)               # clears loading
+    except Exception:
+        set_loading(None)
+        raise
+
+
+def _worker_chat(req):
+    """A chat runs against whatever model is active right now (switches ahead of it
+    in the queue have already taken effect). Record the user message, then stream
+    the reply straight into a 'streaming' DB row so every client watches it grow."""
+    key = get_state()['active_model']
+    if not key:
+        raise RuntimeError('no active model')
+    backend = _resolve_backend(key)
+    backend.activate()                # idempotent: ensure resident
+    add_message(key, 'user', req['content'], status='done')
+    msgs = prompt_messages(key)
+    reply_id = add_message(key, 'assistant', '', status='streaming')
+    log_event('model_request', '-', 'POST', '/enqueue', request_id=req.get('request_id'),
+              model=key, request_body=req['content'], message_count=len(msgs),
+              backend=backend.__class__.__name__)
+
+    params = {'max_tokens': 1024, 'temperature': 0.7, 'top_p': 0.9}
+    full = ''
+    n_tokens = None
+    first_t = last_t = None
+    last_flush = 0.0
+    error = None
+    infer_enter()                     # pause background downloads while generating
+    try:
+        for chunk in backend.stream(msgs, params):
+            u = chunk.get('usage') or {}
+            if u.get('completion_tokens'):
+                n_tokens = u['completion_tokens']
+            delta = chunk.get('choices', [{}])[0].get('delta', {})
+            piece = delta.get('content') or delta.get('reasoning') or ''
+            if piece:
+                now = time.time()
+                if first_t is None:
+                    first_t = now
+                last_t = now
+                full += piece
+                if now - last_flush >= STREAM_FLUSH_S:
+                    update_message(reply_id, key, full)
+                    last_flush = now
+    except Exception as e:
+        error = str(e)
+    finally:
+        infer_exit()
+
+    gen_ms = int((last_t - first_t) * 1000) if (first_t and last_t and last_t > first_t) else None
+    if not full and error:
+        full = f'<Mervin>Error: {error}</Mervin>'
+    if n_tokens is None:
+        n_tokens = max(1, len(full) // 4) if full else 0
+    finish_message(reply_id, key, full, n_tokens, gen_ms)
+    log_event('model_response', '-', 'POST', '/enqueue', request_id=req.get('request_id'),
+              model=key, status=500 if error else 200, response_body=full, error=error)
+
+
+##############################################################################
 # Request / response log
 ##############################################################################
 
@@ -1231,20 +1609,27 @@ class ProxyHandler(SimpleHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
-        if self.path == '/health':
-            with active_lock:
-                model = active_model
+        path, _, query = self.path.partition('?')
+        if path == '/health':
+            # The whole arena snapshot, polled by every client ~1x/second.
+            st = get_state()
+            q = queue_view()
+            busy = st['loading_model'] is not None or len(q) > 0
             self._json_response({
-                'status': 'ok' if model else 'loading',
-                'model': model,
+                'status': 'ok' if st['active_model'] else 'loading',
+                'model': st['active_model'],
+                'loading': st['loading_model'],
+                'busy': busy,
+                'queue': q,
                 'available': available_map(),
                 'states': states_map(),
                 'hardware': HARDWARE,
+                'revs': all_revs(),
             })
-        elif self.path == '/v1/models':
-            data = [{'id': k, 'object': 'model'}
-                    for k, b in backends.items() if getattr(b, 'available', False)]
-            self._json_response({'object': 'list', 'data': data})
+        elif path == '/history':
+            self._handle_history(query)
+        elif path == '/request':
+            self._handle_request(query)
         elif self.path == '/':
             self.path = '/index.html'
             super().do_GET()
@@ -1254,10 +1639,10 @@ class ProxyHandler(SimpleHTTPRequestHandler):
     def do_POST(self):
         content_len = int(self.headers.get('Content-Length', 0))
         body = self.rfile.read(content_len)
-        if self.path == '/switch':
-            self._handle_switch(body)
-        elif self.path == '/v1/chat/completions':
-            self._handle_chat(body)
+        if self.path == '/enqueue':
+            self._handle_enqueue(body)
+        elif self.path == '/clear':
+            self._handle_clear(body)
         elif self.path == '/shutdown':
             self._handle_shutdown()
         else:
@@ -1272,172 +1657,79 @@ class ProxyHandler(SimpleHTTPRequestHandler):
         self._json_response({'status': 'shutting_down'})
         begin_shutdown(self.server)
 
-    def _handle_switch(self, body):
-        global active_model
+    def _handle_enqueue(self, body):
+        """Queue a chat message or a model switch and return its id immediately. The
+        worker processes the queue in order; the result shows up in the DB, which
+        every client is polling."""
         ip = self.client_address[0]
-        try:
-            data = json.loads(body)
-            key = data.get('model')
-            if key not in MODELS:
-                self._json_response({'error': f'Unknown model: {key}'}, 400)
-                return
-            # Weights may have arrived since startup but the backend is still a
-            # placeholder -- build it on demand before switching.
-            if not getattr(backends[key], 'available', False) and weights_present(key):
-                bring_online(key)
-            backend = backends[key]
-            if not getattr(backend, 'available', False):
-                st = model_state.get(key, 'unavailable')
-                if st in ('pending', 'downloading'):
-                    self._json_response(
-                        {'error': f'{MODELS[key]["name"]} is still downloading',
-                         'status': 'downloading', 'model': key}, 503)
-                else:
-                    self._json_response(
-                        {'error': f'{MODELS[key]["name"]} is not available on this server',
-                         'status': 'unavailable', 'model': key}, 503)
-                return
-            log_request(ip, 'POST', '/switch', request_body=f'switch to {key}')
-            # Load the new model (unloading the previous one) under GEN_LOCK so the
-            # swap never runs during an in-flight generation. Only one model is
-            # ever resident.
-            if not GEN_LOCK.acquire(timeout=300):
-                self._json_response({'error': 'Server busy, try again'}, 503)
-                return
-            try:
-                backend.activate()
-                with active_lock:
-                    active_model = key
-            finally:
-                GEN_LOCK.release()
-            self._json_response({'status': 'ok', 'model': key})
-        except Exception as e:
-            self._json_response({'error': str(e)}, 500)
-
-    def _handle_chat(self, body):
-        ip = self.client_address[0]
-        with active_lock:
-            key = active_model
-        if not key:
-            self._json_response({'error': 'Server still starting'}, 503)
-            return
-
         try:
             req = json.loads(body)
         except json.JSONDecodeError:
             self._json_response({'error': 'Invalid JSON'}, 400)
             return
+        kind = req.get('kind')
+        if kind == 'switch':
+            model = req.get('model')
+            if model not in MODELS:
+                self._json_response({'error': f'Unknown model: {model}'}, 400)
+                return
+            rid = enqueue('switch', model=model, request_id=req.get('request_id'))
+            log_request(ip, 'POST', '/enqueue', request_body=f'switch {model}')
+            self._json_response({'status': 'queued', 'id': rid, 'kind': 'switch'})
+        elif kind == 'chat':
+            content = (req.get('content') or '').strip()
+            if not content:
+                self._json_response({'error': 'Empty message'}, 400)
+                return
+            rid = enqueue('chat', content=content, request_id=req.get('request_id'))
+            log_event('http_request', ip, 'POST', '/enqueue',
+                      request_id=req.get('request_id'), request_body=content)
+            self._json_response({'status': 'queued', 'id': rid, 'kind': 'chat'})
+        else:
+            self._json_response({'error': f'Unknown request kind: {kind}'}, 400)
 
-        request_id = req.get('request_id') or uuid.uuid4().hex
-        chat_id = req.get('chat_id') or f'server-{request_id}'
-        backend = backends.get(key)
-        if backend is None or not getattr(backend, 'available', False):
-            backend = SpoofBackend(key)   # graceful "can't run here"
-
-        messages = req.get('messages', [])
-        params = {
-            'max_tokens':  req.get('max_tokens', 256),
-            'temperature': req.get('temperature', 0.7),
-            'top_p':       req.get('top_p', 0.9),
-        }
-        stream = req.get('stream', False)
-
-        user_msgs = [m['content'] for m in messages if m.get('role') == 'user']
-        log_user_msg = user_msgs[-1] if user_msgs else None
-        log_event('http_request', ip, 'POST', '/v1/chat/completions',
-                  request_id=request_id, chat_id=chat_id, model=key,
-                  request_body=log_user_msg, message_count=len(messages),
-                  stream=stream)
-
-        # One model is resident at a time, so generation and switching share a
-        # single lock: this serializes generations and guarantees no model swap
-        # happens mid-response.
-        if not GEN_LOCK.acquire(timeout=300):
-            log_event('http_response', ip, 'POST', '/v1/chat/completions',
-                      request_id=request_id, chat_id=chat_id, model=key,
-                      status=503, response_body='Server busy, try again')
-            self._json_response({'error': 'Server busy, try again'}, 503)
+    def _handle_request(self, query):
+        """Status of a queued request -- the CLI polls this to wait for its reply."""
+        try:
+            rid = int((parse_qs(query).get('id') or [''])[0])
+        except ValueError:
+            self._json_response({'error': 'bad id'}, 400)
             return
-        infer_enter()                 # pause background downloads while generating
+        status, error = request_status(rid)
+        if status is None:
+            self._json_response({'error': 'not found'}, 404)
+            return
+        self._json_response({'id': rid, 'status': status, 'error': error})
+
+    def _handle_history(self, query):
+        """GET /history -> every model's transcript + revisions.
+        GET /history?model=<key> -> just that model's messages + revision."""
+        params = parse_qs(query)
+        model = (params.get('model') or [None])[0]
+        if model is not None:
+            if model not in MODELS:
+                self._json_response({'error': f'Unknown model: {model}'}, 400)
+                return
+            msgs, rev = history_snapshot(model)
+            self._json_response({'model': model, 'messages': msgs, 'rev': rev})
+            return
+        hist, revs = all_history()
+        self._json_response({'history': hist, 'revs': revs})
+
+    def _handle_clear(self, body):
+        """Erase one model's shared transcript (clears it for everyone)."""
+        ip = self.client_address[0]
         try:
-            # Re-resolve under the lock (a /switch may have changed the active
-            # model), then ensure that model is the single resident one.
-            with active_lock:
-                key = active_model
-            backend = backends.get(key)
-            if backend is None or not getattr(backend, 'available', False):
-                backend = SpoofBackend(key)
-            backend.activate()        # idempotent if already the resident model
-            log_event('model_request', ip, 'POST', '/v1/chat/completions',
-                      request_id=request_id, chat_id=chat_id, model=key,
-                      request_body=log_user_msg, message_count=len(messages),
-                      params=params, backend=backend.__class__.__name__)
-            if stream:
-                self._stream_response(backend, messages, params, ip, log_user_msg,
-                                      request_id, chat_id, key)
-            else:
-                result = backend.complete(messages, params)
-                text = content_of(result.get('choices', [{}])[0].get('message', {}))
-                log_event('model_response', ip, 'POST', '/v1/chat/completions',
-                          request_id=request_id, chat_id=chat_id, model=key,
-                          status=200, response_body=text)
-                log_event('http_response', ip, 'POST', '/v1/chat/completions',
-                          request_id=request_id, chat_id=chat_id, model=key,
-                          status=200, response_body=text)
-                self._json_response(result)
-        except Exception as e:
-            log_event('model_response', ip, 'POST', '/v1/chat/completions',
-                      request_id=request_id, chat_id=chat_id, model=key,
-                      status=500, error=str(e))
-            log_event('http_response', ip, 'POST', '/v1/chat/completions',
-                      request_id=request_id, chat_id=chat_id, model=key,
-                      status=500, error=str(e))
-            try:
-                self._json_response({'error': str(e)}, 500)
-            except Exception:
-                pass
-        finally:
-            infer_exit()              # resume background downloads
-            GEN_LOCK.release()
-
-    def _stream_response(self, backend, messages, params, ip, log_user_msg,
-                         request_id, chat_id, key):
-        self.send_response(200)
-        self._cors_headers()
-        self.send_header('Content-Type', 'text/event-stream')
-        self.send_header('Cache-Control', 'no-cache')
-        self.send_header('Connection', 'close')
-        self.end_headers()
-
-        full = ''
-        error = None
-        try:
-            for chunk in backend.stream(messages, params):
-                delta = chunk.get('choices', [{}])[0].get('delta', {})
-                piece = delta.get('content') or delta.get('reasoning') or ''
-                if piece:
-                    full += piece
-                self.wfile.write(f'data: {json.dumps(chunk)}\n\n'.encode())
-                self.wfile.flush()
-            self.wfile.write(b'data: [DONE]\n\n')
-            self.wfile.flush()
-        except Exception as e:
-            error = str(e)
-            err_chunk = {'error': error}
-            try:
-                self.wfile.write(f'data: {json.dumps(err_chunk)}\n\n'.encode())
-                self.wfile.write(b'data: [DONE]\n\n')
-                self.wfile.flush()
-            except Exception:
-                pass
-
-        status = 500 if error else 200
-        log_event('model_response', ip, 'POST', '/v1/chat/completions',
-                  request_id=request_id, chat_id=chat_id, model=key,
-                  status=status, response_body=full, error=error)
-        log_event('http_response', ip, 'POST', '/v1/chat/completions',
-                  request_id=request_id, chat_id=chat_id, model=key,
-                  status=200, response_body=full, error=error)
+            key = json.loads(body).get('model')
+        except json.JSONDecodeError:
+            self._json_response({'error': 'Invalid JSON'}, 400)
+            return
+        if key not in MODELS:
+            self._json_response({'error': f'Unknown model: {key}'}, 400)
+            return
+        rev = history_clear(key)
+        log_request(ip, 'POST', '/clear', request_body=f'clear {key}')
+        self._json_response({'status': 'ok', 'model': key, 'rev': rev})
 
     def _json_response(self, obj, status=200):
         data = json.dumps(obj).encode()
@@ -1588,11 +1880,11 @@ def _api_get(base, path):
         return json.loads(r.read())
 
 
-def _api_switch(base, key):
-    req = Request(base + '/switch', data=json.dumps({'model': key}).encode(),
+def _api_post(base, path, payload, timeout=30):
+    req = Request(base + path, data=json.dumps(payload).encode(),
                   headers={'Content-Type': 'application/json'}, method='POST')
     try:
-        with urlopen(req, timeout=120) as r:
+        with urlopen(req, timeout=timeout) as r:
             return r.status, json.loads(r.read())
     except HTTPError as e:
         try:
@@ -1601,50 +1893,82 @@ def _api_switch(base, key):
             return e.code, {}
 
 
-def _api_chat_stream(host, port, messages):
-    """POST a streaming chat to the local server; return (text, usage_tokens|None,
-    elapsed_seconds|None) measured across the streamed deltas."""
-    payload = json.dumps({'messages': messages, 'stream': True, 'max_tokens': 1024}).encode()
-    conn = http.client.HTTPConnection(host, port, timeout=300)
-    conn.request('POST', '/v1/chat/completions', body=payload,
-                 headers={'Content-Type': 'application/json'})
-    resp = conn.getresponse()
-    full, buf, usage = '', '', None
-    first_t = last_t = None
+def _api_clear(base, key):
+    return _api_post(base, '/clear', {'model': key})
+
+
+def _wait_request(base, rid, timeout=900):
+    """Block until a queued request finishes; return (status, error). A switch may
+    take minutes (cold model load), so poll patiently."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            r = _api_get(base, f'/request?id={rid}')
+        except Exception:
+            time.sleep(0.5)
+            continue
+        if r.get('status') in ('done', 'error', 'cancelled'):
+            return r.get('status'), r.get('error')
+        time.sleep(0.4)
+    return 'timeout', 'request did not finish in time'
+
+
+def _api_switch(base, key):
+    """Enqueue a model switch and wait for it. Returns (ok, error)."""
+    code, resp = _api_post(base, '/enqueue', {'kind': 'switch', 'model': key})
+    if code != 200:
+        return False, resp.get('error', f'HTTP {code}')
+    status, error = _wait_request(base, resp['id'])
+    return status == 'done', error
+
+
+def _last_assistant(base, key):
+    """The most recent assistant message dict for a model, or None."""
     try:
-        while True:
-            raw = resp.read(512)
-            if not raw:
-                break
-            buf += raw.decode('utf-8', 'replace')
-            while '\n' in buf:
-                line, buf = buf.split('\n', 1)
-                line = line.strip()
-                if not line.startswith('data: '):
-                    continue
-                data = line[6:]
-                if data == '[DONE]':
-                    buf = ''
-                    break
-                try:
-                    chunk = json.loads(data)
-                except json.JSONDecodeError:
-                    continue
-                u = chunk.get('usage') or {}
-                if u.get('completion_tokens'):
-                    usage = u['completion_tokens']
-                for ch in chunk.get('choices', []):
-                    delta = ch.get('delta', {})
-                    piece = delta.get('content') or delta.get('reasoning') or ''
-                    if piece:
-                        now = time.time()
-                        first_t = first_t or now
-                        last_t = now
-                        full += piece
-    finally:
-        conn.close()
-    elapsed = (last_t - first_t) if (first_t and last_t and last_t > first_t) else None
-    return full, usage, elapsed
+        msgs = _api_get(base, '/history?model=' + key).get('messages', [])
+    except Exception:
+        return None
+    for m in reversed(msgs):
+        if m.get('role') == 'assistant':
+            return m
+    return None
+
+
+def _msg_elapsed(m):
+    return (m.get('gen_ms') / 1000.0) if m.get('gen_ms') else None
+
+
+def _send_chat(base, key, content):
+    """Enqueue a chat, wait for it, and print the reply (read back from the DB)."""
+    code, resp = _api_post(base, '/enqueue', {'kind': 'chat', 'content': content})
+    if code != 200:
+        print(f'  [{resp.get("error", "HTTP " + str(code))}]')
+        return
+    status, error = _wait_request(base, resp['id'])
+    if status != 'done':
+        print(f'  [chat {status}: {error or ""}]')
+        return
+    msg = _last_assistant(base, key)
+    if msg:
+        _print_reply(msg.get('content', ''), msg.get('n_tokens'), _msg_elapsed(msg))
+    else:
+        print('  [no reply]')
+
+
+def _print_history(base, key):
+    """Print the shared transcript for a model when entering / switching to it."""
+    try:
+        msgs = _api_get(base, '/history?model=' + key).get('messages', [])
+    except Exception:
+        return
+    if not msgs:
+        return
+    print(f'\n  -- shared history: {MODELS[key]["name"]} ({len(msgs)} messages) --')
+    for m in msgs:
+        if m.get('role') == 'user':
+            print(f'  you> {m.get("content", "")}')
+        else:
+            _print_reply(m.get('content', ''), m.get('n_tokens'), _msg_elapsed(m))
 
 
 def _print_reply(reply, usage, elapsed):
@@ -1665,9 +1989,6 @@ def _print_reply(reply, usage, elapsed):
 
 
 def chat_repl(base):
-    host, port = '127.0.0.1', PORT
-    history = {k: [] for k in MODELS}
-
     health = {}
     for _ in range(30):                       # wait briefly for an active model
         try:
@@ -1680,13 +2001,14 @@ def chat_repl(base):
     active = health.get('model') or next(iter(MODELS))
 
     print('\n' + '=' * 60)
-    print('  Mervin/Mervis CLI chat. Type a message, or:')
+    print('  Mervin/Mervis CLI chat (shares each model\'s transcript with the web UI).')
     print('    /model            list models and their state')
     print('    /model <name>     switch (e.g. /model mistral)')
-    print('    /clear            forget this model\'s history')
+    print('    /clear            erase this model\'s shared history (for everyone)')
     print('    /help             show commands')
     print('    /quit             exit')
     print('=' * 60)
+    _print_history(base, active)
 
     while True:
         try:
@@ -1706,8 +2028,11 @@ def chat_repl(base):
             elif cmd == '/help':
                 print('  /model | /model <name> | /clear | /help | /quit')
             elif cmd == '/clear':
-                history[active] = []
-                print(f'  cleared {active} history')
+                code, resp = _api_clear(base, active)
+                if code == 200:
+                    print(f'  erased {active} shared history')
+                else:
+                    print(f'  cannot clear: {resp.get("error", "HTTP " + str(code))}')
             elif cmd == '/model':
                 states = {}
                 try:
@@ -1723,32 +2048,29 @@ def chat_repl(base):
                     if not key:
                         print(f'  unknown model: {arg}')
                     else:
-                        code, resp = _api_switch(base, key)
-                        if code == 200:
+                        print(f'  switching to {MODELS[key]["name"]} (loading may take a while)...')
+                        ok, err = _api_switch(base, key)
+                        if ok:
                             active = key
                             print(f'  switched to {key} ({MODELS[key]["name"]})')
+                            _print_history(base, active)
                         else:
-                            print(f'  cannot switch: {resp.get("error", "HTTP " + str(code))}')
+                            print(f'  cannot switch: {err or "failed"}')
             else:
                 print(f'  unknown command: {cmd}')
             continue
 
-        # Ensure the server is on our model before generating. This goes through
-        # the same /switch + locks as the web UI -> single-filed inference.
-        code, resp = _api_switch(base, active)
-        if code != 200:
-            print(f'  ({MODELS[active]["name"]}: {resp.get("error", "not ready")})')
+        # Make sure the arena is on our model first (a web user may have switched),
+        # then send. Both go through the same queue/worker as the web UI.
+        ok, err = _api_switch(base, active)
+        if not ok:
+            print(f'  ({MODELS[active]["name"]}: {err or "not ready"})')
             continue
-
-        history[active].append({'role': 'user', 'content': line})
-        messages = history[active]   # no system prompt -- behavior is fine-tuned in
-        reply, usage, elapsed = _api_chat_stream(host, port, messages)
-        history[active].append({'role': 'assistant', 'content': reply})
-        _print_reply(reply, usage, elapsed)
+        _send_chat(base, active, line)
 
 
 def main():
-    global active_model, PORT, LLAMA_SERVER
+    global PORT, LLAMA_SERVER
 
     argv = sys.argv[1:]
     print_command_line_help()
@@ -1767,6 +2089,7 @@ def main():
         refresh_stale_weights()
 
     build_backends()
+    init_chat_db()             # open / create the shared transcript store
 
     if args['check']:
         describe_plan()
@@ -1794,9 +2117,10 @@ def main():
         print('[serve] ERROR: no models could be made available on this host.', flush=True)
         sys.exit(1)
 
-    active_model = ready[0]
-    backends[active_model].activate()         # load ONLY this model (single slot)
-    print(f'[serve] active model: {active_model}', flush=True)
+    first_model = ready[0]
+    backends[first_model].activate()          # load ONLY this model (single slot)
+    set_active(first_model)                    # record the resident model in the DB
+    print(f'[serve] active model: {first_model}', flush=True)
     print(f'[serve] selectable:   {ready}', flush=True)
 
     try:
@@ -1812,6 +2136,9 @@ def main():
 
     signal.signal(signal.SIGINT, cleanup)
     signal.signal(signal.SIGTERM, cleanup)
+
+    # The single worker that drains the request queue (chats + switches).
+    threading.Thread(target=worker_loop, daemon=True).start()
 
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()

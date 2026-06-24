@@ -29,6 +29,10 @@ bin/llama.cpp/
 tmp/
 logs/
 run*.log
+# shared per-model chat transcripts (SQLite; persisted across restarts)
+chat_history.db
+chat_history.db-wal
+chat_history.db-shm
 screenshots/
 __pycache__/
 *.pyc

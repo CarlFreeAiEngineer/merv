@@ -117,7 +117,7 @@ body {
 .model-column .col-name { font-size: 15px; font-weight: 700; color: #eee; }
 .model-column .col-info { font-size: 11px; color: #6b7088; }
 .model-column .col-badge {
-  margin-left: auto;
+  margin-left: 8px;
   font-size: 10px;
   font-weight: 700;
   text-transform: uppercase;
@@ -129,6 +129,22 @@ body {
 }
 .model-column.active .col-badge { background: #1b4e2d; color: #66ff99; }
 .model-column.switchable .col-badge { background: #3a2f12; color: #e0a64e; }
+/* per-column "erase this shared conversation" button (pushed to the right) */
+.erase-btn {
+  margin-left: auto;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid #5a2330;
+  background: #2a1620;
+  color: #e08493;
+  cursor: pointer;
+}
+.erase-btn:hover:not(:disabled) { background: #4a2230; color: #fff; border-color: #e94560; }
+.erase-btn:disabled { opacity: .4; cursor: default; }
 
 .chat-area {
   flex: 1;
@@ -271,15 +287,19 @@ const MODELS = {
 };
 const MODEL_KEYS = Object.keys(MODELS);
 
-// One model is resident server-side at a time -- this mirrors that.
-let activeModel = null;
-let generating  = false;     // a generation is in flight (any column)
-let switching   = false;     // a /switch is in flight
-let firstShown  = false;     // have we scrolled the active model into view once?
+// The whole arena state lives in the server's DB; this client just mirrors it and
+// repaints from it. The only genuinely local state is what we are typing.
+let activeModel   = null;    // the resident model (from /health)
+let loadingModel  = null;    // a model currently loading (a switch in flight)
+let busy          = false;   // a generation/switch is in flight anywhere
+let pendingSwitch = null;    // a switch this client just asked for (drives the overlay)
+let firstShown    = false;   // have we scrolled the active model into view once?
 
-// Per-model chat state, kept in memory so each column keeps its own history.
-let conversations = {};
-let chatIds = {};
+// Per-model mirror of the DB transcript + the revision we last painted. `optimistic`
+// holds a just-typed message we echo immediately, until the DB reflects it.
+let history     = {};        // key -> [{role, content, status, n_tokens, gen_ms}]
+let localRev    = {};        // key -> revision we last rendered (-1 => fetch next poll)
+let optimistic  = {};        // key -> text of a just-sent message not yet in the DB
 // From /health: state is 'ready' | 'downloading' | 'pending' | 'unavailable'.
 let modelStates = {};
 
@@ -288,8 +308,8 @@ function newId(prefix) {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 MODEL_KEYS.forEach(k => {
-  conversations[k] = [];
-  chatIds[k] = newId(`chat-${k}`);
+  history[k] = [];
+  localRev[k] = -1;
   modelStates[k] = 'pending';
 });
 
@@ -300,7 +320,7 @@ const $switchText  = document.getElementById('switch-text');
 const $desc        = document.getElementById('desc-column');
 
 // ---- build one column per model -----------------------------------------
-const cols = {};   // model -> { col, chat, input, send, badge }
+const cols = {};   // model -> { col, chat, input, send, badge, erase }
 MODEL_KEYS.forEach(m => {
   const col = document.createElement('div');
   col.className = 'column model-column locked';
@@ -310,6 +330,7 @@ MODEL_KEYS.forEach(m => {
     <div class="col-header">
       <span class="col-name">${MODELS[m].name}</span>
       <span class="col-info">${MODELS[m].info}</span>
+      <button class="erase-btn" id="erase-${m}" title="Erase this shared conversation for everyone">Erase</button>
       <span class="col-badge" id="badge-${m}">...</span>
     </div>
     <div class="chat-area" id="chat-${m}"></div>
@@ -325,19 +346,36 @@ MODEL_KEYS.forEach(m => {
     input: col.querySelector(`#input-${m}`),
     send:  col.querySelector(`#send-${m}`),
     badge: col.querySelector(`#badge-${m}`),
+    erase: col.querySelector(`#erase-${m}`),
   };
   cols[m] = els;
 
   // Click a dimmed (ready, non-resident) column to load that model.
   col.addEventListener('click', () => {
     if (m === activeModel) { els.input.focus(); return; }
+    if (busy || loadingModel) {
+      flashStatus(loadingModel ? `Loading ${MODELS[loadingModel].name}...` : 'Busy -- one moment');
+      return;
+    }
     if (modelStates[m] === 'ready') switchTo(m);
     else flashStatus(stateBlurb(m));
   });
   els.send.addEventListener('click', e => { e.stopPropagation(); sendMessage(m); });
   els.input.addEventListener('keydown', e => { if (e.key === 'Enter') sendMessage(m); });
   els.input.addEventListener('click', e => e.stopPropagation());
+  els.erase.addEventListener('click', e => { e.stopPropagation(); eraseConversation(m); });
 });
+
+// The active model is pinned to the first model slot (right after the About
+// column); the rest stay in ascending size order. Reorder the DOM whenever the
+// active model changes. appendChild moves a node, so About (first child) stays put
+// and the model columns line up after it.
+function reorderColumns() {
+  const order = activeModel
+    ? [activeModel, ...MODEL_KEYS.filter(k => k !== activeModel)]
+    : [...MODEL_KEYS];
+  order.forEach(k => $columns.appendChild(cols[k].col));
+}
 
 // ---- load the editable description fragment -----------------------------
 fetch(API_BASE + '/description.html')
@@ -365,15 +403,23 @@ function stateBlurb(m) {
 function renderColumns() {
   MODEL_KEYS.forEach(m => {
     const els = cols[m];
-    const isActive = m === activeModel;
+    const isActive  = m === activeModel;
+    const isLoading = m === loadingModel;
     const ready = modelStates[m] === 'ready';
-    els.col.classList.toggle('active', isActive);
-    els.col.classList.toggle('switchable', !isActive && ready);
-    els.col.classList.toggle('locked', !isActive && !ready);
-    els.badge.textContent = isActive ? BADGE.active : (BADGE[modelStates[m]] || '...');
-    const enable = isActive && !generating && !switching;
+    els.col.classList.toggle('active', isActive && !loadingModel);
+    els.col.classList.toggle('switchable', !isActive && ready && !busy && !loadingModel);
+    els.col.classList.toggle('locked', (!isActive && !ready) || ((busy || !!loadingModel) && !isActive));
+    els.badge.textContent = isLoading ? 'Loading...'
+                          : isActive  ? (busy ? 'Replying...' : BADGE.active)
+                          : (BADGE[modelStates[m]] || '...');
+    // Block typing until the current reply is done: only the resident model takes
+    // input, and only when the arena is idle (nothing generating or loading).
+    const enable = isActive && ready && !busy && !loadingModel;
     els.input.disabled = !enable;
     els.send.disabled  = !enable;
+    const has = !!(history[m] && history[m].length);
+    els.erase.disabled = !has;
+    els.erase.style.display = has ? '' : 'none';
   });
 }
 
@@ -385,46 +431,50 @@ function flashStatus(msg) {
   statusTimer = setTimeout(updateStatus, 3500);
 }
 function updateStatus() {
+  if (loadingModel) { $status.textContent = `Loading ${MODELS[loadingModel].name}...`; return; }
   if (!activeModel) { $status.textContent = 'Connecting...'; return; }
+  const base = busy ? `${MODELS[activeModel].name} is replying...` : `Active: ${MODELS[activeModel].name}`;
   const dl = MODEL_KEYS.filter(m => modelStates[m] === 'downloading' || modelStates[m] === 'pending');
   $status.textContent = dl.length
-    ? `Active: ${MODELS[activeModel].name} — downloading ${dl.map(m => MODELS[m].name).join(', ')}`
-    : `Active: ${MODELS[activeModel].name}`;
+    ? `${base} — downloading ${dl.map(m => MODELS[m].name).join(', ')}`
+    : base;
+}
+
+// ---- loading overlay (shown for everyone while a model loads) ------------
+let overlayT0 = 0, overlayTimer = null, overlayBase = '';
+function showOverlay(text) {
+  overlayBase = text;
+  if (!overlayTimer) {
+    overlayT0 = performance.now();
+    const tick = () => { $switchText.textContent = `${overlayBase}  ${Math.round((performance.now() - overlayT0) / 1000)}s`; };
+    tick();
+    overlayTimer = setInterval(tick, 500);
+  }
+  $switch.classList.remove('hidden');
+}
+function hideOverlay() {
+  if (overlayTimer) { clearInterval(overlayTimer); overlayTimer = null; }
+  $switch.classList.add('hidden');
 }
 
 // ---- switching the resident model ---------------------------------------
+// Enqueue a switch and let the poll loop drive the overlay + re-pin from the DB.
 async function switchTo(model) {
-  if (model === activeModel || generating || switching) return;
+  if (model === activeModel || busy || loadingModel) return;
   if (modelStates[model] !== 'ready') { flashStatus(stateBlurb(model)); return; }
-  switching = true;
-  renderColumns();
-  const t0 = performance.now();
-  const tick = () => {
-    const s = Math.round((performance.now() - t0) / 1000);
-    $switchText.textContent = `Loading ${MODELS[model].name}...  ${s}s`;
-  };
-  tick();
-  const timer = setInterval(tick, 500);
-  $switch.classList.remove('hidden');
+  pendingSwitch = model;
+  showOverlay(`Loading ${MODELS[model].name}...`);
   try {
-    const resp = await fetch(API_BASE + '/switch', {
+    const resp = await fetch(API_BASE + '/enqueue', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model })
+      body: JSON.stringify({ kind: 'switch', model })
     });
-    if (!resp.ok) throw new Error(await resp.text());
-    activeModel = model;
+    if (!resp.ok) { const e = await resp.json().catch(() => ({})); throw new Error(e.error || `HTTP ${resp.status}`); }
   } catch (e) {
+    pendingSwitch = null;
+    hideOverlay();
     flashStatus(`Error: ${e.message}`);
-  } finally {
-    clearInterval(timer);
-    switching = false;
-    $switch.classList.add('hidden');
-    renderColumns();
-    updateStatus();
-    // Activating a model must not move the horizontal scroll; preventScroll
-    // stops focus() from yanking an off-screen column into view.
-    if (model === activeModel) cols[model].input.focus({ preventScroll: true });
   }
 }
 
@@ -503,123 +553,135 @@ function assistantBubbles(content) {
   }
   return html;
 }
-function renderMessage(chatEl, role, content) {
-  const div = document.createElement('div');
-  if (role === 'user') {
-    div.className = 'msg user';
-    div.innerHTML = `<div class="bubble">${escapeHtml(content)}</div>`;
-  } else {
-    div.className = 'msg-pair';
-    div.innerHTML = assistantBubbles(content);
-  }
-  chatEl.appendChild(div);
-  chatEl.scrollTop = chatEl.scrollHeight;
-}
 function escapeHtml(s) {
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
 }
-function tokRateCaption(text, firstT, lastT, usageTokens) {
-  if (firstT === null || lastT === null || lastT <= firstT) return '';
-  const secs = (lastT - firstT) / 1000;
-  const approx = !usageTokens;
-  const toks = usageTokens || Math.max(1, Math.round(text.length / 4));
-  const rate = (toks / secs).toFixed(1);
-  return `<div class="tokrate">${approx ? '~' : ''}${rate} tok/s &middot; ${secs.toFixed(1)}s</div>`;
+// tok/s caption built from what the server stored on the assistant row, so it
+// persists across repaints and is identical for every viewer.
+function tokRate(nTokens, genMs) {
+  if (!genMs || genMs <= 0 || !nTokens) return '';
+  const secs = genMs / 1000;
+  return `<div class="tokrate">${(nTokens / secs).toFixed(1)} tok/s &middot; ${secs.toFixed(1)}s</div>`;
 }
 
-// ---- send a message in a model's column ---------------------------------
+// ---- repaint a column entirely from the DB snapshot ---------------------
+function renderColumnHistory(model) {
+  const chatEl = cols[model].chat;
+  const msgs = history[model] || [];
+  let html = '';
+  msgs.forEach(m => {
+    if (m.role === 'user') {
+      html += `<div class="msg user"><div class="bubble">${escapeHtml(m.content)}</div></div>`;
+    } else if (m.status === 'streaming') {
+      // While streaming, show the RAW response (tags visible, just escaped) so the
+      // user sees exactly what the model emits; it splits into two bubbles on done.
+      html += `<div class="msg-pair"><div class="bubble mervin-bubble streaming-cursor">${escapeHtml(m.content || '') || 'Thinking...'}</div></div>`;
+    } else {
+      html += `<div class="msg-pair">${assistantBubbles(m.content)}${tokRate(m.n_tokens, m.gen_ms)}</div>`;
+    }
+  });
+  // Echo a just-typed message until the DB has it, then drop the echo.
+  const opt = optimistic[model];
+  if (opt && !msgs.some(m => m.role === 'user' && m.content === opt)) {
+    html += `<div class="msg user"><div class="bubble">${escapeHtml(opt)}</div></div>`;
+  } else if (opt) {
+    optimistic[model] = null;
+  }
+  chatEl.innerHTML = html;
+  chatEl.scrollTop = chatEl.scrollHeight;
+}
+
+async function refreshHistory(model) {
+  try {
+    const r = await fetch(API_BASE + '/history?model=' + encodeURIComponent(model));
+    if (!r.ok) return;
+    const d = await r.json();
+    history[model]  = Array.isArray(d.messages) ? d.messages : [];
+    localRev[model] = d.rev ?? 0;
+    renderColumnHistory(model);
+  } catch { /* leave the column as-is on a transient error */ }
+}
+
+async function eraseConversation(model) {
+  if (!(history[model] && history[model].length)) return;
+  if (!confirm(`Erase the shared ${MODELS[model].name} conversation? This clears it for everyone.`)) return;
+  try {
+    const r = await fetch(API_BASE + '/clear', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model })
+    });
+    if (!r.ok) { flashStatus('Erase failed'); return; }
+    const d = await r.json();
+    history[model]  = [];
+    localRev[model] = d.rev ?? (localRev[model] + 1);
+    optimistic[model] = null;
+    renderColumnHistory(model);
+    renderColumns();
+  } catch { flashStatus('Erase failed'); }
+}
+
+// ---- send a message: enqueue it; the poll loop paints the streamed reply --
 async function sendMessage(model) {
-  if (model !== activeModel || generating || switching) return;
+  if (model !== activeModel || busy || loadingModel) return;
   const els = cols[model];
   const text = els.input.value.trim();
   if (!text) return;
   els.input.value = '';
-  generating = true;
+  optimistic[model] = text;        // echo immediately
+  busy = true;                     // disable input now; the poll keeps it until done
+  renderColumnHistory(model);
   renderColumns();
-
-  renderMessage(els.chat, 'user', text);
-  conversations[model].push({ role: 'user', content: text });
-
-  const streamDiv = document.createElement('div');
-  streamDiv.className = 'msg-pair';
-  streamDiv.innerHTML = `<div class="bubble mervin-bubble streaming-cursor"></div>`;
-  els.chat.appendChild(streamDiv);
-  els.chat.scrollTop = els.chat.scrollHeight;
-
-  let fullText = '', firstT = null, lastT = null, usageTokens = null, failed = false, waitingTimer = null;
   try {
-    waitingTimer = setTimeout(() => {
-      if (!fullText) streamDiv.innerHTML = `<div class="bubble mervin-bubble streaming-cursor">Waiting for first token...</div>`;
-    }, 2500);
-    const resp = await fetch(API_BASE + '/v1/chat/completions', {
+    const resp = await fetch(API_BASE + '/enqueue', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: chatIds[model],
-        request_id: newId('req'),
-        messages: [...conversations[model]],
-        stream: true,
-        max_tokens: 1024
-      })
+      body: JSON.stringify({ kind: 'chat', request_id: newId('req'), content: text })
     });
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop();
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        const data = line.slice(6);
-        if (data === '[DONE]') break;
-        let j = null;
-        try { j = JSON.parse(data); } catch { continue; }
-        if (j.error) { failed = true; throw new Error(typeof j.error === 'string' ? j.error : JSON.stringify(j.error)); }
-        if (j.usage?.completion_tokens) usageTokens = j.usage.completion_tokens;
-        const delta = j.choices?.[0]?.delta?.content;
-        if (delta) {
-          const now = performance.now();
-          if (firstT === null) firstT = now;
-          lastT = now;
-          fullText += delta;
-          streamDiv.innerHTML = `<div class="bubble mervin-bubble streaming-cursor">${escapeHtml(fullText)}</div>`;
-          els.chat.scrollTop = els.chat.scrollHeight;
-        }
-      }
+    if (!resp.ok) {
+      const e = await resp.json().catch(() => ({}));
+      optimistic[model] = null;
+      busy = false;
+      if (els.input.value === '') els.input.value = text;   // hand the message back
+      flashStatus(e.error || `HTTP ${resp.status}`);
+      renderColumnHistory(model);
+      renderColumns();
     }
+    // On success: nothing more to do here. The worker writes the reply into the DB
+    // and every client (including us) paints it from the next /history poll.
   } catch (e) {
-    failed = true;
-    streamDiv.innerHTML = `<div class="bubble mervin-bubble" style="color:#e94560">Error: ${escapeHtml(e.message)}</div>`;
-  } finally {
-    if (waitingTimer) clearTimeout(waitingTimer);
+    optimistic[model] = null;
+    busy = false;
+    if (els.input.value === '') els.input.value = text;
+    flashStatus(e.message);
+    renderColumnHistory(model);
+    renderColumns();
   }
-
-  if (!failed && fullText.trim()) {
-    conversations[model].push({ role: 'assistant', content: fullText });
-    let finalHtml = assistantBubbles(fullText);
-    finalHtml += tokRateCaption(fullText, firstT, lastT, usageTokens);
-    streamDiv.innerHTML = finalHtml;
-    els.chat.scrollTop = els.chat.scrollHeight;
-  } else if (!failed) {
-    streamDiv.innerHTML = `<div class="bubble mervin-bubble" style="color:#e94560">Error: empty response from model</div>`;
-  }
-
-  generating = false;
-  renderColumns();
-  els.input.focus();
 }
 
-// ---- health polling -----------------------------------------------------
+// ---- health polling: repaint everything from the snapshot ----------------
 function applyHealth(data) {
   if (data.hardware) document.getElementById('hw-info').textContent = data.hardware;
   if (data.states) modelStates = { ...modelStates, ...data.states };
-  // Server is the source of truth for which model is resident.
-  if (!switching && data.model && data.model !== activeModel && modelStates[data.model] === 'ready') {
+  loadingModel = data.loading || null;
+  busy = !!data.busy;
+  // The server owns the resident model. If it changed (we switched, or another
+  // user did), re-pin the layout so the active model sits in the first slot.
+  if (data.model && data.model !== activeModel) {
     activeModel = data.model;
+    reorderColumns();
+    updateNav();
+    ensureActiveVisible();
+  }
+  // Drive the loading overlay purely from server state (+ a switch we just asked for).
+  if (loadingModel) showOverlay(`Loading ${MODELS[loadingModel].name}...`);
+  else if (pendingSwitch && activeModel !== pendingSwitch) showOverlay(`Loading ${MODELS[pendingSwitch].name}...`);
+  else { pendingSwitch = null; hideOverlay(); }
+  // Refetch any column whose revision moved (a reply streamed, a message sent, an
+  // erase). This is how every client sees the streaming text grow.
+  if (data.revs) {
+    MODEL_KEYS.forEach(m => {
+      if (data.revs[m] !== undefined && data.revs[m] !== localRev[m]) refreshHistory(m);
+    });
   }
   renderColumns();
   if (!statusTimer) updateStatus();
@@ -629,28 +691,29 @@ async function init() {
   renderColumns();
   updateNav();
   $status.textContent = 'Connecting...';
+  // Poll forever; faster while something streams/loads so the reply animates.
   const poll = async () => {
-    let keepGoing = false;
+    let delay = 2000;
     try {
       const resp = await fetch(API_BASE + '/health');
       if (resp.ok) {
         const data = await resp.json();
-        if (data.status === 'loading') {
+        if (data.status === 'loading' && !data.model) {
           $status.textContent = 'Loading model...';
           setTimeout(poll, 1000);
           return;
         }
-        if (activeModel === null && data.model) { activeModel = data.model; }
         applyHealth(data);
         if (!firstShown && activeModel) { ensureActiveVisible(); firstShown = true; }
-        keepGoing = MODEL_KEYS.some(m => modelStates[m] === 'downloading' || modelStates[m] === 'pending');
+        const downloading = MODEL_KEYS.some(m => modelStates[m] === 'downloading' || modelStates[m] === 'pending');
+        delay = (busy || loadingModel) ? 1000 : (downloading ? 1500 : 2000);
       }
     } catch (e) {
       $status.textContent = 'Server not running -- start serve.py first';
       setTimeout(poll, 2000);
       return;
     }
-    if (keepGoing) setTimeout(poll, 3000);
+    setTimeout(poll, delay);
   };
   poll();
 }

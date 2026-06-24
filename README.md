@@ -1,10 +1,26 @@
 # Mervin/Mervis -- Cross-Platform Model Arena
 
-A local chat arena for fine-tuned LLMs. Pick a model from the dropdown and chat;
-each model keeps its own history, so you can switch between them freely. Every
-response comes back as two characters: **Mervin** (a sardonic pessimist) and
-**Mervis** (a relentless optimist), wrapped in
-`<Mervin>...</Mervin><Mervis>...</Mervis>` tags.
+A local chat arena for fine-tuned LLMs. Each model gets its own column; click a
+column to make that model the active one and chat. Every response comes back as
+two characters: **Mervin** (a sardonic pessimist) and **Mervis** (a relentless
+optimist), wrapped in `<Mervin>...</Mervin><Mervis>...</Mervis>` tags.
+
+**Shared conversations, streamed to everyone.** All state lives in a SQLite file
+(`chat_history.db`) and every client repaints itself purely by polling that
+state, so **everyone using the arena sees the same thing**. A reply is written
+into the database token by token, and each browser re-reads it about once a
+second -- so all viewers watch the answer stream in, not just whoever asked. Each
+column has an **Erase** button that wipes that model's conversation for everyone,
+and each reply shows its tokens/sec. The full transcript is always stored and
+shown, but only the **last 3 turns** (the new message plus the previous two
+exchanges) are sent to the model as context -- so on the 4th message the model no
+longer sees the 1st exchange.
+
+**One queue, one model.** Messages and model switches are appended to a request
+queue, and a single worker drains it in order, so exactly one model is resident
+and one reply is generated at a time. The text field is disabled while a reply is
+generating or a model is loading (you can type again once it is done). A chat runs
+against whatever model is active when the worker reaches it.
 
 One `serve.py` runs on **all three** of our hosts -- macOS, Linux, and Windows --
 and adapts its inference backend automatically to whatever the host can do.
@@ -69,8 +85,11 @@ required.
 
 By default it starts **web-only**. Pass `--cli` for a built-in terminal chat
 alongside the web UI: type to chat, `/model` to list models and their download
-state, `/model <name>` to switch (e.g. `/model mistral`), `/quit` to exit. Every
-reply -- web and CLI -- ends with a tokens/sec readout.
+state, `/model <name>` to switch (e.g. `/model mistral`), `/clear` to erase the
+current model's shared conversation, `/quit` to exit. The CLI is a thin client
+over the same endpoints as the web UI, so the two **share each model's
+transcript** -- a message typed in one shows up in the other. Every reply -- web
+and CLI -- ends with a tokens/sec readout.
 
 ### macOS / Linux
 ```bash
@@ -196,6 +215,20 @@ each per-model folder's `README.md` and `finetune_*.ipynb` for the exact pipelin
 - **Tags** -- the models are fine-tuned to emit clean `<Mervin>`/`<Mervis>` tags
   directly, so the old regex tag-fixups have been removed from both `serve.py`
   and `index.html`.
+- **Endpoints** -- `POST /enqueue` adds a chat message or a model switch to the
+  queue and returns immediately; `GET /history[?model=<key>]` reads a transcript
+  (including the partially-streamed reply); `POST /clear` erases one; `GET
+  /request?id=<n>` reports a queued request's status (the CLI waits on it). The
+  whole arena snapshot -- resident model, `loading`, `busy`, the queue, and a
+  per-model revision counter -- comes from `GET /health`, which every client polls
+  about once a second; a client only refetches a column when its revision moved.
+- **Worker + queue** -- a single worker thread drains the request queue in order,
+  so switching and generation are serialized with no lock: exactly one model is
+  resident and one reply streams at a time. A reply is written into the database
+  as it generates (`status` flips `streaming` -> `done`, with `n_tokens`/`gen_ms`
+  for the tokens/sec readout). While a model loads, `/health` reports `loading` and
+  every client shows "Loading X..." with inputs disabled. The text field is also
+  disabled while a reply is generating, and re-enabled when it finishes.
 - **Logs** -- every request/response is appended to `logs/YYYY-MM-DD-HHZ.log` as
   newline-delimited JSON.
 - **Reverse proxy** -- `index.html` derives its API base from the URL path, so it
