@@ -49,3 +49,8 @@ Thumbs.db
 *.part
 # per-machine weight checksum sidecars (cache for the staleness check)
 *.sha256
+
+# session test scratch
+*-test.*.log
+phi-gpu-test.*
+serve-test.*

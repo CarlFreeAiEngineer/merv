@@ -279,11 +279,12 @@ const API_BASE = location.pathname.replace(/\/(index\.html)?$/, '');
 
 // Add a new model here (and in serve.py) -- columns are built from this object.
 const MODELS = {
-  phi:     { name: 'Phi-4-mini',  info: '2.4GB Q4_K_M' },
-  gemma2b: { name: 'Gemma 4 E2B', info: '3.1GB Q4_K_M' },
-  mistral: { name: 'Mistral 7B',  info: '4.4GB Q4_K_M' },
-  qwen:    { name: 'Qwen 2.5 7B', info: '4.7GB Q4_K_M' },
-  gemma:   { name: 'Gemma 4 E4B', info: '5.0GB Q4_K_M' },
+  phi:       { name: 'Phi-4-mini',  info: '2.4GB Q4_K_M' },
+  gemma2b:   { name: 'Gemma 4 E2B', info: '3.1GB Q4_K_M' },
+  mistral:   { name: 'Mistral 7B',  info: '4.4GB Q4_K_M' },
+  qwen:      { name: 'Qwen 2.5 7B', info: '4.7GB Q4_K_M' },
+  gemma:     { name: 'Gemma 4 E4B', info: '5.0GB Q4_K_M' },
+  gptoss20b: { name: 'GPT-OSS 20B', info: '12GB IQ2_M (needs >16GB)' },
 };
 const MODEL_KEYS = Object.keys(MODELS);
 
@@ -302,6 +303,7 @@ let localRev    = {};        // key -> revision we last rendered (-1 => fetch ne
 let optimistic  = {};        // key -> text of a just-sent message not yet in the DB
 // From /health: state is 'ready' | 'downloading' | 'pending' | 'unavailable'.
 let modelStates = {};
+let lastFocusModel = null;   // avoid refocusing on every poll tick when nothing changed
 
 function newId(prefix) {
   if (globalThis.crypto?.randomUUID) return `${prefix}-${globalThis.crypto.randomUUID()}`;
@@ -503,6 +505,31 @@ function ensureActiveVisible() {
   if (!visible) scrollToCol(col);
 }
 
+function ensureAboutVisible() {
+  const about = $desc;
+  if (!about) return;
+  const colsArr = allColumns();
+  if (!colsArr.length) return;
+  const firstModel = colsArr.find(c => c.dataset.model);
+  if (!firstModel) return;
+  // If the viewport can show About plus at least one model column, pin the row
+  // back to the left edge after a switch so About stays visible.
+  if ($columns.clientWidth >= (about.offsetWidth + firstModel.offsetWidth + gapPx())) {
+    $columns.scrollTo({ left: 0, behavior: 'smooth' });
+  }
+}
+
+function focusActiveInput() {
+  if (!activeModel || busy || loadingModel) return;
+  const els = cols[activeModel];
+  if (!els || !els.input || els.input.disabled) return;
+  if (lastFocusModel === activeModel && document.activeElement === els.input) return;
+  requestAnimationFrame(() => {
+    if (!els.input.disabled) els.input.focus({ preventScroll: true });
+    lastFocusModel = activeModel;
+  });
+}
+
 // Recompute the three labels + arrow enabled-state from the scroll position.
 function updateNav() {
   const colsArr = allColumns();
@@ -527,6 +554,12 @@ function updateNav() {
   $navRight.disabled = !rightHidden;
   $navLeft._target  = leftHidden;
   $navRight._target = rightHidden;
+}
+
+function gapPx() {
+  const gap = getComputedStyle($columns).gap || getComputedStyle($columns).columnGap || '0px';
+  const n = parseFloat(gap);
+  return Number.isFinite(n) ? n : 0;
 }
 
 $navLeft.addEventListener('click',  () => scrollToCol($navLeft._target));
@@ -675,18 +708,22 @@ async function sendMessage(model) {
 // ---- health polling: repaint everything from the snapshot ----------------
 function applyHealth(data) {
   const prevBusy = busy;
+  const prevLoading = loadingModel;
+  const activeChanged = !!(data.model && data.model !== activeModel);
   if (data.hardware) document.getElementById('hw-info').textContent = data.hardware;
   if (data.states) modelStates = { ...modelStates, ...data.states };
   loadingModel = data.loading || null;
   busy = !!data.busy;
   // The server owns the resident model. If it changed (we switched, or another
   // user did), re-pin the layout so the active model sits in the first slot.
-  if (data.model && data.model !== activeModel) {
+  if (activeChanged) {
     activeModel = data.model;
     reorderColumns();
     updateNav();
     ensureActiveVisible();
+    ensureAboutVisible();
     scrollChatToBottom(activeModel);
+    lastFocusModel = null;
   }
   // Drive the loading overlay purely from server state (+ a switch we just asked for).
   if (loadingModel) showOverlay(`Loading ${MODELS[loadingModel].name}...`);
@@ -701,6 +738,9 @@ function applyHealth(data) {
   }
   renderColumns();
   if ((!busy && prevBusy) && activeModel) scrollChatToBottom(activeModel);
+  if ((!busy && prevBusy) || (prevLoading && !loadingModel) || (data.model && data.model !== lastFocusModel)) {
+    focusActiveInput();
+  }
   if (!statusTimer) updateStatus();
 }
 

@@ -229,6 +229,17 @@ MODELS = {
             os.path.join(BASE_DIR, 'mistral7b', 'model-q4_k_m.gguf'),
         ],
     },
+    # Showcase-only: trained + on HF (freeideas/merv-gptoss20b) but its ~12GB IQ2_M
+    # GGUF won't run on a 16GB box. NOT in HF_WEIGHTS, so it never downloads; it
+    # shows as the last, always-"unavailable" column. See gptoss20b/README.md.
+    'gptoss20b': {
+        'name': 'GPT-OSS 20B',
+        'kind': 'llama',
+        'port': 52847,
+        'gguf': [
+            os.path.join(BASE_DIR, 'gptoss20b', 'model-iq2_m.gguf'),
+        ],
+    },
 }
 
 
@@ -765,17 +776,6 @@ class ProxyBackend:
               f'running on CPU (is the CUDA runtime present?)', flush=True)
         return False
 
-    def boot(self):
-        if self._boot_once():
-            return True
-        # GPU launch failed (e.g. VRAM OOM) -- retry CPU-only so the model still
-        # runs. This is the "GPU if it can, else CPU" fallback, decided per model.
-        if self._gpu_layers() != '0':
-            print(f'[serve] {self.key}: GPU launch failed -- retrying CPU-only', flush=True)
-            self._force_cpu()
-            return self._boot_once()
-        return False
-
     def _boot_once(self):
         gpu = self._gpu_layers()
         where = f'GPU (ngl={gpu})' if gpu != '0' else 'CPU'
@@ -787,12 +787,29 @@ class ProxyBackend:
             print(f'[serve] {self.key} ready on port {self.port} [{where}]', flush=True)
             if gpu != '0':
                 self._verify_gpu()
+            self._warmup_probe()
             return True
         except TimeoutError as e:
             out = self.proc.stdout.read(4096).decode('utf-8', 'replace') if self.proc.stdout else ''
             print(f'[serve] {self.key} failed to start ({e}):\n{out}', flush=True)
             self.stop()
             return False
+        except Exception as e:
+            out = self.proc.stdout.read(4096).decode('utf-8', 'replace') if self.proc.stdout else ''
+            print(f'[serve] {self.key} warmup probe failed ({e}):\n{out}', flush=True)
+            self.stop()
+            return False
+
+    def boot(self):
+        if self._boot_once():
+            return True
+        # GPU launch failed (e.g. VRAM OOM) -- retry CPU-only so the model still
+        # runs. This is the "GPU if it can, else CPU" fallback, decided per model.
+        if self._gpu_layers() != '0':
+            print(f'[serve] {self.key}: GPU launch failed -- retrying CPU-only', flush=True)
+            self._force_cpu()
+            return self._boot_once()
+        return False
 
     def _alive(self):
         return self.proc is not None and self.proc.poll() is None
@@ -836,6 +853,47 @@ class ProxyBackend:
         conn.request('POST', '/v1/chat/completions', body=body,
                      headers={'Content-Type': 'application/json'})
         return conn  # caller reads resp then closes
+
+    def _warmup_probe(self):
+        """Run one hidden streaming completion and stop after the first token
+        chunk. This proves the model can actually decode before the UI unlocks."""
+        payload = {
+            'messages': [{'role': 'user', 'content': 'hi'}],
+            'stream': True,
+            'max_tokens': 2,
+            'temperature': 0.1,
+            'top_p': 0.1,
+        }
+        conn = self._post(payload, stream=True)
+        try:
+            resp = conn.getresponse()
+            if resp.status >= 400:
+                data = resp.read().decode('utf-8', 'replace')
+                raise RuntimeError(data or f'HTTP {resp.status}')
+            saw_token = False
+            while True:
+                line = resp.readline()
+                if not line:
+                    break
+                text = line.decode('utf-8', 'replace').strip()
+                if not text.startswith('data: '):
+                    continue
+                data = text[6:]
+                if data == '[DONE]':
+                    break
+                try:
+                    chunk = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                delta = chunk.get('choices', [{}])[0].get('delta', {})
+                piece = delta.get('content') or delta.get('reasoning') or ''
+                if piece:
+                    saw_token = True
+                    break
+            if not saw_token:
+                raise RuntimeError('warmup probe produced no token')
+        finally:
+            conn.close()
 
     def complete(self, messages, params):
         payload = {'messages': messages, 'stream': False, **params}

@@ -1,0 +1,7 @@
+{
+  "name": "GPT-OSS 20B",
+  "size_gb": 12.1,
+  "min_ram_gb": 24,
+  "needs_gpu": false,
+  "notes": "Showcase only -- shown as an always-unavailable column. The persona was trained and the IQ2_M GGUF is on HF (freeideas/merv-gptoss20b), but gpt-oss-20b is a MoE whose 2880 hidden dim blocks sub-4-bit quants, so it floors at ~12GB / 4.61 BPW. That needs clearly more than 16GB RAM to run via mmap without paging every token, so it is never downloaded here (not in HF_WEIGHTS) and min_ram_gb is set high. See finetune_gptoss20b.ipynb for the full pipeline and gotchas."
+}
