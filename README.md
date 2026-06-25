@@ -69,6 +69,14 @@ How the choice is made:
   launched as a subprocess and proxied; all such backends stay resident so
   switching is instant. Otherwise the model runs in-process with
   `llama-cpp-python` on CPU, loading one model at a time and swapping on switch.
+- **Why `bin/` only ships a Windows server binary.** Windows has no clean
+  package-manager path for llama.cpp, so the prebuilt `llama-server.exe` (a CUDA
+  build) is the one binary we bundle / auto-download into `bin/llama.cpp/`.
+  **Linux** ships no server binary at all -- the `llama-cpp-python` wheel (an
+  inline script dep installed only on Linux) has llama.cpp compiled inside it and
+  runs the model in-process. **macOS** uses the system `llama-server` from
+  `brew install llama.cpp` (for Metal GPU). So Mac and Linux provision inference at
+  runtime rather than from a bundled binary.
 
 ---
 
