@@ -72,7 +72,7 @@ import uuid
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from urllib.request import urlopen, Request
 from urllib.error import URLError, HTTPError
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, unquote_plus
 from datetime import datetime, timezone
 
 if sys.stdout.encoding != 'utf-8':
@@ -1592,6 +1592,29 @@ def log_request(ip, method, path, request_body=None, response_body=None):
               request_body=request_body, response_body=response_body)
 
 
+def fresh_shutdown_timestamp(query, now=None, window_s=300):
+    """Accept a forgiving UTC timestamp in the query string.
+
+    Looks for timestamp-like text anywhere in the raw query, strips separators,
+    and accepts YYYYMMDDHHMM or YYYYMMDDHHMMSS within +/- window_s.
+    """
+    now = now or datetime.now(timezone.utc)
+    text = unquote_plus(query or '')
+    digits = ''.join(re.findall(r'\d', text))
+    for start in range(len(digits)):
+        for width, fmt in ((12, '%Y%m%d%H%M'), (14, '%Y%m%d%H%M%S')):
+            stamp = digits[start:start + width]
+            if len(stamp) < width:
+                continue
+            try:
+                ts = datetime.strptime(stamp, fmt).replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+            if abs((now - ts).total_seconds()) <= window_s:
+                return True, ts
+    return False, None
+
+
 ##############################################################################
 # HTTP handler
 ##############################################################################
@@ -1630,6 +1653,8 @@ class ProxyHandler(SimpleHTTPRequestHandler):
             self._handle_history(query)
         elif path == '/request':
             self._handle_request(query)
+        elif path == '/shutdown':
+            self._handle_shutdown('GET', query)
         elif self.path == '/':
             self.path = '/index.html'
             super().do_GET()
@@ -1644,16 +1669,24 @@ class ProxyHandler(SimpleHTTPRequestHandler):
         elif self.path == '/clear':
             self._handle_clear(body)
         elif self.path == '/shutdown':
-            self._handle_shutdown()
+            self._handle_shutdown('POST')
         else:
             self.send_error(404)
 
-    def _handle_shutdown(self):
+    def _handle_shutdown(self, method, query=''):
         ip = self.client_address[0]
         if ip not in ('127.0.0.1', '::1'):
             self._json_response({'error': 'Shutdown is only allowed from localhost'}, 403)
             return
-        log_request(ip, 'POST', '/shutdown')
+        if method == 'GET':
+            ok, ts = fresh_shutdown_timestamp(query)
+            if not ok:
+                self._json_response({'error': 'GET /shutdown requires a UTC timestamp within 5 minutes'}, 400)
+                return
+            request_body = f'timestamp {ts.isoformat()}'
+        else:
+            request_body = None
+        log_request(ip, method, '/shutdown', request_body=request_body)
         self._json_response({'status': 'shutting_down'})
         begin_shutdown(self.server)
 

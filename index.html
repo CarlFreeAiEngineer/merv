@@ -564,6 +564,20 @@ function tokRate(nTokens, genMs) {
   return `<div class="tokrate">${(nTokens / secs).toFixed(1)} tok/s &middot; ${secs.toFixed(1)}s</div>`;
 }
 
+function scrollChatToBottom(model) {
+  const chatEl = cols[model] && cols[model].chat;
+  if (!chatEl) return;
+  const bottom = () => { chatEl.scrollTop = chatEl.scrollHeight; };
+  bottom();
+  requestAnimationFrame(() => {
+    bottom();
+    requestAnimationFrame(bottom);
+  });
+  chatEl.querySelectorAll('img').forEach(img => {
+    if (!img.complete) img.addEventListener('load', bottom, { once: true });
+  });
+}
+
 // ---- repaint a column entirely from the DB snapshot ---------------------
 function renderColumnHistory(model) {
   const chatEl = cols[model].chat;
@@ -588,7 +602,7 @@ function renderColumnHistory(model) {
     optimistic[model] = null;
   }
   chatEl.innerHTML = html;
-  chatEl.scrollTop = chatEl.scrollHeight;
+  scrollChatToBottom(model);
 }
 
 async function refreshHistory(model) {
@@ -660,6 +674,7 @@ async function sendMessage(model) {
 
 // ---- health polling: repaint everything from the snapshot ----------------
 function applyHealth(data) {
+  const prevBusy = busy;
   if (data.hardware) document.getElementById('hw-info').textContent = data.hardware;
   if (data.states) modelStates = { ...modelStates, ...data.states };
   loadingModel = data.loading || null;
@@ -671,6 +686,7 @@ function applyHealth(data) {
     reorderColumns();
     updateNav();
     ensureActiveVisible();
+    scrollChatToBottom(activeModel);
   }
   // Drive the loading overlay purely from server state (+ a switch we just asked for).
   if (loadingModel) showOverlay(`Loading ${MODELS[loadingModel].name}...`);
@@ -684,6 +700,7 @@ function applyHealth(data) {
     });
   }
   renderColumns();
+  if ((!busy && prevBusy) && activeModel) scrollChatToBottom(activeModel);
   if (!statusTimer) updateStatus();
 }
 
